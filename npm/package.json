@@ -1,0 +1,20 @@
+{
+  "name": "bookmark-bridge",
+  "version": "0.1.0",
+  "description": "Chrome bookmarks as MCP tools, with every change recorded in git so it can be rolled back",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/semanticist21/bookmark-bridge.git"
+  },
+  "homepage": "https://github.com/semanticist21/bookmark-bridge",
+  "bin": {
+    "bookmark-bridge": "bin/bookmark-bridge.mjs"
+  },
+  "files": ["bin/", "README.md"],
+  "engines": {
+    "node": ">=18"
+  },
+  "os": ["darwin", "linux"],
+  "keywords": ["mcp", "model-context-protocol", "bookmarks", "chrome"]
+}

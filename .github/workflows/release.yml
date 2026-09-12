@@ -1,0 +1,72 @@
+# Ships prebuilt binaries so nobody has to install Rust to use this.
+# Building from source was the single biggest reason not to bother.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tag to build and publish
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Add target
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        working-directory: mcp
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        working-directory: mcp
+        run: |
+          set -euo pipefail
+          name="bookmark-bridge-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "target/${{ matrix.target }}/release/bookmark-bridge" "dist/$name/"
+          cp ../LICENSE ../README.md "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          # The npm launcher verifies this before it will run a downloaded binary.
+          shasum -a 256 "dist/$name.tar.gz" | awk '{print $1"  '"$name"'.tar.gz"}' > "dist/$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: mcp/dist/*.tar.gz*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Collect checksums
+        run: cat artifacts/*.sha256 > artifacts/SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ inputs.tag || github.ref_name }}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --title "$tag" --generate-notes --verify-tag \
+            artifacts/*.tar.gz artifacts/SHA256SUMS

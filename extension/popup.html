@@ -17,6 +17,16 @@
     <dd><input id="enabled" type="checkbox" class="switch" role="switch"></dd>
   </dl>
 
+  <!-- Only shown while nothing is listening. Without it, a fresh install just
+       says "Disconnected" and never explains that a local server is the other
+       half of this. -->
+  <p class="hint" id="hint" hidden>
+    No server on this port yet. Register it with your MCP client:
+    <code>npx -y bookmark-bridge</code>
+    <a id="help" href="https://github.com/semanticist21/bookmark-bridge#install"
+       target="_blank" rel="noreferrer">Setup guide</a>
+  </p>
+
   <div class="row">
     <button id="reconnect">Reconnect</button>
     <button id="reload">Reload extension</button>

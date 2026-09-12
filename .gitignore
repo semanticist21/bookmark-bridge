@@ -11,3 +11,6 @@ assets/icon-ai*.png
 assets/icon-master.png
 
 .DS_Store
+
+# Store submission package (rebuilt on demand).
+store/

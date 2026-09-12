@@ -9,6 +9,10 @@ const light = (id, state, text) => {
   $('v' + id).textContent = text;
 };
 
+// The setup hint belongs on screen only while there is nothing to talk to.
+// Showing it once connected would be noise.
+const hint = (show) => { $('hint').hidden = !show; };
+
 const ago = (t) => {
   if (!t) return '—';
   const s = Math.round((Date.now() - t) / 1000);
@@ -20,6 +24,7 @@ async function refresh() {
   if (enabled === false) {
     light('Worker', 'off', '—');
     light('Socket', 'off', 'Off');
+    hint(false);
     return;
   }
   // A reply means the worker is alive. No reply means it is not.
@@ -28,14 +33,17 @@ async function refresh() {
   if (!st) {
     light('Worker', 'warn', 'Asleep');
     light('Socket', 'warn', 'Disconnected');
+    hint(true);
     return;
   }
   light('Worker', 'on', 'Running');
   if (st.open) {
     const up = st.connectedSince ? ago(st.connectedSince).replace(' ago', '') : '—';
     light('Socket', 'on', `Up ${up} · ping ${ago(st.lastPing)}`);
+    hint(false);
   } else {
     light('Socket', 'warn', 'Disconnected');
+    hint(true);
   }
 }
 
