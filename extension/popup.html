@@ -30,8 +30,10 @@
   </p>
 
   <div class="row">
+    <!-- Reconnect redials the socket. Reload restarts the whole extension,
+         which is only needed when its code changed or the worker is wedged. -->
     <button id="reconnect">Reconnect</button>
-    <button id="reload">Reload extension</button>
+    <button id="reload" title="Restart the extension">Reload</button>
   </div>
 </main>
 <script src="popup.js"></script>
