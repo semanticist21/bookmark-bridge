@@ -1,0 +1,25 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Bridgey</title>
+<link rel="stylesheet" href="popup.css">
+<main>
+  <h1>Bridgey <span class="tag">Bookmark MCP</span></h1>
+
+  <ul class="lights">
+    <li><span class="dot" id="dotWorker"></span><span class="k">Service worker</span><span class="v" id="vWorker">—</span></li>
+    <li><span class="dot" id="dotSocket"></span><span class="k">Bridge</span><span class="v" id="vSocket">—</span></li>
+  </ul>
+
+  <dl class="fields">
+    <dt><label for="port">Port</label></dt>
+    <dd><input id="port" type="number" min="1" max="65535" inputmode="numeric"></dd>
+    <dt><label for="enabled">Enabled</label></dt>
+    <dd><input id="enabled" type="checkbox" class="switch" role="switch"></dd>
+  </dl>
+
+  <div class="row">
+    <button id="reconnect">Reconnect</button>
+    <button id="reload">Reload extension</button>
+  </div>
+</main>
+<script src="popup.js"></script>

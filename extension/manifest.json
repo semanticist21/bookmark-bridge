@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Bridgey — Bookmark MCP",
+  "version": "0.1.0",
+  "description": "Lets an MCP client read and tidy your bookmarks. Connects only to 127.0.0.1 and never leaves your machine.",
+  "permissions": [
+    "bookmarks",
+    "storage",
+    "alarms"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Bridgey (Bookmark MCP)",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
+  "host_permissions": [
+    "ws://127.0.0.1/*"
+  ]
+}

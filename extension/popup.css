@@ -1,0 +1,36 @@
+:root{--bg:#fbfbfa;--fg:#1b1b19;--muted:#75756f;--line:#e2e2dd;--ok:#2f6f4f;--off:#b9b9b2;--warn:#a8442f}
+:root:not([data-theme="light"]){@media (prefers-color-scheme:dark){
+ --bg:#17181a;--fg:#e8e8e4;--muted:#95958f;--line:#2e3033;--ok:#6db58c;--off:#4a4c50;--warn:#e09b86}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+ font:14px/1.5 -apple-system,BlinkMacSystemFont,"Apple SD Gothic Neo",system-ui,sans-serif}
+main{width:252px;padding-block:18px;padding-left:18px;padding-right:18px}
+h1{font-size:15px;font-weight:650;margin:0 0 10px;letter-spacing:-.01em}
+.tag{font-size:9px;font-weight:700;letter-spacing:.1em;vertical-align:2px;
+ color:var(--muted);border:1px solid var(--line);border-radius:4px;padding:2px 5px;margin-left:4px}
+.lights{list-style:none;margin:0 0 18px;padding:0;display:grid;gap:7px}
+.lights li{display:grid;grid-template-columns:8px auto 1fr;align-items:center;gap:8px;font-size:12px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--off)}
+.dot[data-s="on"]{background:var(--ok)}
+.dot[data-s="warn"]{background:var(--warn)}
+.k{color:var(--muted)}
+.v{text-align:right;font-variant-numeric:tabular-nums}
+.fields{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px 14px;margin:0}
+dt{color:var(--muted);font-size:13px}
+dd{margin:0;display:flex;align-items:center;gap:10px}
+input[type=number],input[type=password]{width:100%;max-width:92px;padding:6px 9px;
+ border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);
+ font:inherit;font-size:13px;font-variant-numeric:tabular-nums}
+input:focus-visible{outline:2px solid var(--ok);outline-offset:1px;border-color:transparent}
+.switch{appearance:none;width:36px;height:21px;border-radius:11px;background:var(--off);
+ border:0;position:relative;cursor:pointer;transition:background .15s;flex:none}
+.switch::after{content:"";position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;
+ border-radius:50%;background:#fff;transition:transform .15s}
+.switch:checked{background:var(--ok)}
+.switch:checked::after{transform:translateX(15px)}
+
+
+.row{display:flex;gap:7px;margin-top:18px}
+.row button{flex:1;font:inherit;font-size:12px;padding:6px 0;border-radius:7px;cursor:pointer;
+ border:1px solid var(--line);background:transparent;color:var(--fg)}
+.row button:hover{border-color:var(--muted)}

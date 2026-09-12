@@ -1,0 +1,13 @@
+# This machine's bridge token. Never commit.
+extension/token.txt
+# Local port/preference overrides.
+extension/config.local.json
+
+# Rust build output.
+mcp/target/
+
+# Icon drafts kept out of the published tree.
+assets/icon-ai*.png
+assets/icon-master.png
+
+.DS_Store

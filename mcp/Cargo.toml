@@ -1,0 +1,20 @@
+[package]
+name = "bookmark-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "net", "sync", "time"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+strip = true
+opt-level = "z"
+lto = true
+
+[dev-dependencies]
+tempdir = "0.3"
