@@ -60,6 +60,21 @@ impl Server {
         serde_json::from_str(&line).expect("parse reply")
     }
 
+    /// Blocks until the server reports an extension attached.
+    ///
+    /// `Extension::attach` returns once its hello is sent, which is not the same
+    /// as the server having registered it. On a fast machine the gap is
+    /// invisible; on CI it is not, and every snapshot assertion downstream fails
+    /// for a reason that has nothing to do with what it is testing.
+    fn wait_connected(&mut self) {
+        for _ in 0..200 {
+            let (status, _) = self.tool("bridge_status", json!({}));
+            if status["extensionConnected"] == true { return; }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        panic!("the extension never attached");
+    }
+
     /// Calls a tool and returns its decoded payload plus whether it was an error.
     fn tool(&mut self, name: &str, args: Value) -> (Value, bool) {
         let r = self.rpc("tools/call", json!({"name": name, "arguments": args}));
@@ -303,6 +318,7 @@ async fn refuses_to_mutate_while_no_extension_is_attached() {
 async fn applies_a_change_and_snapshots_around_it() {
     let mut s = Server::start();
     let ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
 
     let (status, _) = s.tool("bridge_status", json!({}));
     assert_eq!(status["extensionConnected"], true);
@@ -323,6 +339,7 @@ async fn applies_a_change_and_snapshots_around_it() {
 async fn skips_an_item_whose_value_moved_under_the_plan() {
     let mut s = Server::start();
     let ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
 
     // The user renamed it after the plan was made.
     ext.fake.lock().unwrap().nodes.iter_mut().find(|n| n.0 == "11").unwrap().1 = "Docs, mine".into();
@@ -344,6 +361,7 @@ async fn skips_an_item_whose_value_moved_under_the_plan() {
 async fn creating_the_same_item_twice_makes_one() {
     let mut s = Server::start();
     let ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
     let before = ext.fake.lock().unwrap().nodes.len();
 
     let args = json!({"parentId": "10", "title": "Inbox"});
@@ -359,6 +377,7 @@ async fn creating_the_same_item_twice_makes_one() {
 async fn rejects_a_batch_too_large_for_one_service_worker_event() {
     let mut s = Server::start();
     let _ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
 
     let ops: Vec<Value> = (0..201)
         .map(|i| json!({"op": "create", "parentId": "10", "title": format!("n{i}")}))
@@ -372,6 +391,7 @@ async fn rejects_a_batch_too_large_for_one_service_worker_event() {
 async fn restores_a_deleted_subtree_under_new_ids() {
     let mut s = Server::start();
     let ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
 
     // Take a snapshot by making any change, then delete a folder outright.
     let (_, _) = s.tool("bookmarks_update", json!({"id": "11", "title": "Docs"}));
@@ -396,6 +416,7 @@ async fn restores_a_deleted_subtree_under_new_ids() {
 async fn reports_the_users_own_changes_as_drift() {
     let mut s = Server::start();
     let ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
 
     // Establish agent-head.
     s.tool("bookmarks_update", json!({"id": "11", "title": "Docs"}));
@@ -417,6 +438,7 @@ async fn a_second_session_relays_through_the_first() {
     let port = lease_port();
     let mut host = Server::start_on(port);
     let ext = Extension::attach(port, "ext").await;
+    host.wait_connected();
     // The host must own the port before the peer starts, or both become hosts.
     let (status, _) = host.tool("bridge_status", json!({}));
     assert_eq!(status["extensionConnected"], true);
@@ -440,6 +462,7 @@ async fn a_second_session_relays_through_the_first() {
 async fn keeps_runtime_state_out_of_the_snapshots() {
     let mut s = Server::start();
     let _ext = Extension::attach(s.port, "ext").await;
+    s.wait_connected();
     s.tool("bookmarks_update", json!({"id": "11", "title": "Docs"}));
 
     // A snapshot is the bookmark tree and nothing else. The lock file and the
@@ -472,6 +495,7 @@ async fn runs_without_a_token_when_the_extension_cannot_be_given_one() {
 
     // An extension arriving with no token is accepted, and real work goes through.
     let ext = Extension::attach(port, "ext").await;
+    s.wait_connected();
     let (status, _) = s.tool("bridge_status", json!({}));
     assert_eq!(status["extensionConnected"], true, "a tokenless extension was refused");
     let (_, is_err) = s.tool("bookmarks_update", json!({"id": "11", "title": "Works"}));
@@ -505,6 +529,7 @@ async fn plants_a_token_when_an_unpacked_extension_is_present() {
 
     // The extension presenting that token is accepted; a wrong one is not.
     let _good = Extension::attach(port, &format!("ext:{}", planted.trim())).await;
+    s.wait_connected();
     let (status, _) = s.tool("bridge_status", json!({}));
     assert_eq!(status["extensionConnected"], true, "the planted token was refused");
 }
