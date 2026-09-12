@@ -50,8 +50,11 @@ impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CallError::NotConnected => f.write_str(
-                "The Chrome extension is not connected. Check that it is loaded, \
-                 that the port matches, and that the token matches."),
+                "The Chrome extension is not connected. Its service worker sleeps \
+                 when idle and is not woken on a timer, so this is normal after a \
+                 quiet period. Ask the user to click the extension's toolbar icon, \
+                 which wakes it and reconnects, then try again. If that does not \
+                 help, the extension may not be loaded or the port may not match."),
             CallError::SendFailed => f.write_str(
                 "The extension disconnected before the request was sent. Nothing was changed."),
             CallError::Cancelled => f.write_str(

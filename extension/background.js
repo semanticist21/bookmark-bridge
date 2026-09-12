@@ -228,7 +228,7 @@ async function open_socket() {
     ws.onclose = () => {
       if (!stale()) {
         socket = null; connectedSince = 0; setBadge('\u00b7', 'Disconnected');
-        scheduleReconnect();      // waiting for the alarm (up to 60s) leaves the bridge dead
+        scheduleReconnect();      // retry while awake; the worker may die first
       }
       done();
     };
@@ -267,9 +267,6 @@ async function setBadge(text, title) {
   await chrome.action.setTitle({title: `Bridgey — ${title}`});
 }
 
-// The alarm is registered unconditionally at top level. Registering it only inside
-// onInstalled means it is not re-registered after a reload and the worker stays
-// asleep - another real failure seen here.
 // The popup must not trust the action title: when the worker dies the title stays
 // "Connected". It asks the live worker directly, and no reply is itself the proof
 // that the bridge is down.
@@ -283,10 +280,17 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   return true;
 });
 
-chrome.alarms.create('keepalive', {periodInMinutes: 0.5});
+// No keepalive timer. Tidying bookmarks is occasional work, and waking the worker
+// every 30 seconds to poll a socket nobody is using is the thing MV3 set out to
+// stop. The worker is allowed to die when idle.
+//
+// It comes back whenever something real happens: the browser starts, the
+// extension is installed or reloaded, a setting changes, the popup is opened, or
+// the user touches a bookmark. Every one of those is a registered listener, and a
+// registered listener wakes the worker. connect() runs at the top level, so any
+// of those wakeups reconnects as a side effect.
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
-chrome.alarms.onAlarm.addListener(connect);
 chrome.storage.onChanged.addListener((changes, area) => {
   // The ledger writes to the same storage area. Without a key filter the socket
   // would tear down and reconnect on every bookmark the user edits. Reconnect only

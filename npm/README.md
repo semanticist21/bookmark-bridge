@@ -85,6 +85,13 @@ at `chrome://extensions` with developer mode on.
 
 That is all of it. The extension's popup goes green once the two find each other.
 
+The extension sleeps when you are not using it. Chrome ends an idle service
+worker, and this one is not woken on a timer — tidying bookmarks is occasional
+work, and polling a socket nobody is using is what Manifest V3 set out to stop.
+It wakes on its own when the browser starts, when a setting changes, when you
+touch a bookmark, and when you open its popup. If an agent reports that the
+extension is not connected, clicking the toolbar icon reconnects it.
+
 <details>
 <summary>From source instead</summary>
 
@@ -170,7 +177,7 @@ machine that had already been set up once.
 
 ## Privacy
 
-The extension holds `bookmarks`, `storage` and `alarms`. It connects only to
+The extension holds `bookmarks` and `storage`. It connects only to
 `127.0.0.1` and turns away handshakes carrying an `http(s)` origin, so a web page
 cannot reach it. Nothing goes anywhere else. The token stops a page; it does not
 stop another process on this machine, which can read the token file just as
