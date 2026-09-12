@@ -16,8 +16,7 @@ and relays through it, so several sessions share one browser.
 Two pieces: this server, and the Chrome extension that dials into it.
 
 **1. Register the server with your MCP client.** It downloads itself on first
-run, so you do not need Rust. macOS and Linux only: it uses `flock` and POSIX
-file modes.
+run, so you do not need Rust. macOS, Linux and Windows.
 
 <details open>
 <summary><b>Claude Code</b></summary>
@@ -73,13 +72,13 @@ Install the bookmark-bridge MCP server for me.
    extension from https://github.com/semanticist21/bookmark-bridge and then
    check again.
 
-It is macOS and Linux only. Do not build from source; the npx package fetches
-a prebuilt binary.
+Do not build from source; the npx package fetches a prebuilt binary.
 ```
 
 </details>
 
-Your client starts and stops it for you. Nothing to leave running.
+Your client starts and stops it for you. Nothing to leave running. `git` must be
+on PATH — the snapshots are a real git repository.
 
 **2. Install the extension.** From the Chrome Web Store, or load `extension/`
 at `chrome://extensions` with developer mode on.

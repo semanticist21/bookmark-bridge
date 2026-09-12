@@ -28,6 +28,9 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            exe: .exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -38,19 +41,19 @@ jobs:
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
         working-directory: mcp
+        # bash on the Windows runner too, so one script covers every target.
+        shell: bash
         run: |
           set -euo pipefail
           name="bookmark-bridge-${{ matrix.target }}"
           mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/bookmark-bridge" "dist/$name/"
+          cp "target/${{ matrix.target }}/release/bookmark-bridge${{ matrix.exe }}" "dist/$name/"
           cp ../LICENSE ../README.md "dist/$name/"
           tar -C dist -czf "dist/$name.tar.gz" "$name"
-          # The npm launcher verifies this before it will run a downloaded binary.
-          shasum -a 256 "dist/$name.tar.gz" | awk '{print $1"  '"$name"'.tar.gz"}' > "dist/$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: mcp/dist/*.tar.gz*
+          path: mcp/dist/*.tar.gz
 
   release:
     needs: build
@@ -60,8 +63,10 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Collect checksums
-        run: cat artifacts/*.sha256 > artifacts/SHA256SUMS
+      - name: Checksums
+        # Computed here rather than per-runner, so one tool produces them all and
+        # the npm launcher has a single format to parse.
+        run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}

@@ -20,7 +20,10 @@ const TARGETS = {
   'darwin-x64': 'x86_64-apple-darwin',
   'linux-x64': 'x86_64-unknown-linux-gnu',
   'linux-arm64': 'aarch64-unknown-linux-gnu',
+  'win32-x64': 'x86_64-pc-windows-msvc',
 };
+
+const EXE = process.platform === 'win32' ? '.exe' : '';
 
 function die(message) {
   process.stderr.write(`bookmark-bridge: ${message}\n`);
@@ -30,15 +33,13 @@ function die(message) {
 const key = `${process.platform}-${process.arch}`;
 const target = TARGETS[key];
 if (!target) {
-  die(`no prebuilt server for ${key}. The server uses flock and POSIX file modes, `
-    + `so Windows is not supported. Build from source: `
-    + `https://github.com/${REPO}`);
+  die(`no prebuilt server for ${key}. Build from source: https://github.com/${REPO}`);
 }
 
 // Cached per version, so upgrading the package fetches a matching server rather
 // than silently reusing an old one.
 const cacheDir = join(here, '..', '.bin', pkg.version);
-const binary = join(cacheDir, 'bookmark-bridge');
+const binary = join(cacheDir, `bookmark-bridge${EXE}`);
 
 async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
@@ -86,7 +87,8 @@ async function install() {
     // directory.
     await rm(cacheDir, {recursive: true, force: true});
     await rename(join(staging, `bookmark-bridge-${target}`), cacheDir);
-    await chmod(binary, 0o755);
+    // Windows has no execute bit; the archive already carries it elsewhere.
+    if (process.platform !== 'win32') await chmod(binary, 0o755);
   } finally {
     await rm(staging, {recursive: true, force: true});
   }

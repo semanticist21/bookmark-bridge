@@ -132,23 +132,17 @@ impl Bridge {
 /// value in the extension's storage through its popup.
 fn ensure_token() -> Option<String> {
     let ext = extension_dir()?;
-    let home = std::env::var("HOME").ok()?;
-    let dir = std::path::Path::new(&home).join(".config/bookmark-bridge");
+    let dir = config_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join("token");
     let token = match std::fs::read_to_string(&path) {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
-            // Read exactly what is needed. /dev/urandom is an endless character
-            // device: fs::read would never return, growing its buffer until the
-            // machine gave out. Every first run hit that.
-            use std::io::Read;
             let mut raw = [0u8; 24];
-            std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut raw).ok()?;
+            getrandom::fill(&mut raw).ok()?;
             let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
             std::fs::write(&path, &t).ok()?;
-            let _ = std::fs::set_permissions(&path,
-                std::os::unix::fs::PermissionsExt::from_mode(0o600));
+            owner_only(&path);
             t
         }
     };
@@ -287,8 +281,48 @@ fn compact(v: &Value) -> String {
 /// marker into every snapshot, and their appearing and disappearing would make
 /// "nothing changed, so do not commit" never hold.
 fn state_dir() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    std::path::Path::new(&home).join(".local/state/bookmark-bridge")
+    #[cfg(windows)]
+    {
+        let base = std::env::var("LOCALAPPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .unwrap_or_default();
+        std::path::Path::new(&base).join("bookmark-bridge")
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").unwrap_or_default();
+        std::path::Path::new(&home).join(".local/state/bookmark-bridge")
+    }
+}
+
+/// Where the shared token lives. Separate from the state directory because it
+/// is configuration the user may want to find, not churn.
+fn config_dir() -> Option<std::path::PathBuf> {
+    #[cfg(windows)]
+    {
+        let base = std::env::var("APPDATA")
+            .or_else(|_| std::env::var("USERPROFILE"))
+            .ok()?;
+        Some(std::path::Path::new(&base).join("bookmark-bridge"))
+    }
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var("HOME").ok()?;
+        Some(std::path::Path::new(&home).join(".config/bookmark-bridge"))
+    }
+}
+
+/// Restricts a file to its owner where the platform expresses that as a mode.
+/// On Windows the file inherits the user profile's ACL, which is already
+/// per-user, and there is no mode to set.
+fn owner_only(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, PermissionsExt::from_mode(0o600));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// The git worktree. It holds exactly one file: the bookmark tree.
@@ -344,17 +378,17 @@ impl HistoryLock {
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let f = std::fs::OpenOptions::new().create(true).write(true)
             .open(dir.join("bridge.lock")).map_err(|e| e.to_string())?;
-        // The kernel releases flock when the process dies, so a leftover lock file
+        // The OS releases the lock when the process dies, so a leftover lock file
         // never blocks the next run.
-        let rc = unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&f), libc::LOCK_EX) };
-        if rc != 0 { return Err("could not acquire the history lock".into()); }
+        fs4::fs_std::FileExt::lock_exclusive(&f)
+            .map_err(|e| format!("could not acquire the history lock: {e}"))?;
         Ok(HistoryLock(f))
     }
 }
 
 impl Drop for HistoryLock {
     fn drop(&mut self) {
-        unsafe { libc::flock(std::os::unix::io::AsRawFd::as_raw_fd(&self.0), libc::LOCK_UN) };
+        let _ = fs4::fs_std::FileExt::unlock(&self.0);
     }
 }
 

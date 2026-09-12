@@ -13,6 +13,12 @@ use std::sync::{Arc, Mutex};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 
+/// Where the server keeps its state under a given fake home.
+fn state_root(home: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) { home.join("bookmark-bridge") }
+    else { home.join(".local/state/bookmark-bridge") }
+}
+
 /// Ports are leased from a high range so concurrently running tests never collide.
 static NEXT_PORT: AtomicU16 = AtomicU16::new(18787);
 fn lease_port() -> u16 {
@@ -37,7 +43,10 @@ impl Server {
     fn start_on(port: u16) -> Server {
         let home = tempdir::TempDir::new("bb-test").expect("temp home");
         let mut child = Command::new(env!("CARGO_BIN_EXE_bookmark-bridge"))
+            // Both, so the temp directory isolates the run on every platform.
             .env("HOME", home.path())
+            .env("LOCALAPPDATA", home.path())
+            .env("APPDATA", home.path())
             .env("BOOKMARK_BRIDGE_PORT", port.to_string())
             .env("BOOKMARK_BRIDGE_TOKEN", "")
             .stdin(Stdio::piped())
@@ -467,7 +476,7 @@ async fn keeps_runtime_state_out_of_the_snapshots() {
 
     // A snapshot is the bookmark tree and nothing else. The lock file and the
     // dirty marker must not ride along, or an unchanged tree still commits.
-    let history = s.home.path().join(".local/state/bookmark-bridge/history");
+    let history = state_root(s.home.path()).join("history");
     let tracked = Command::new("git").arg("-C").arg(&history).arg("ls-files")
         .output().expect("git ls-files");
     let files: Vec<&str> = std::str::from_utf8(&tracked.stdout).unwrap()
@@ -484,6 +493,8 @@ async fn runs_without_a_token_when_the_extension_cannot_be_given_one() {
     let home = tempdir::TempDir::new("bb-notoken").expect("temp home");
     let mut child = Command::new(env!("CARGO_BIN_EXE_bookmark-bridge"))
         .env("HOME", home.path())
+        .env("LOCALAPPDATA", home.path())
+        .env("APPDATA", home.path())
         .env("BOOKMARK_BRIDGE_PORT", port.to_string())
         .env("BOOKMARK_BRIDGE_EXT_DIR", home.path().join("no-such-extension"))
         .env_remove("BOOKMARK_BRIDGE_TOKEN")
@@ -512,6 +523,8 @@ async fn plants_a_token_when_an_unpacked_extension_is_present() {
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_bookmark-bridge"))
         .env("HOME", home.path())
+        .env("LOCALAPPDATA", home.path())
+        .env("APPDATA", home.path())
         .env("BOOKMARK_BRIDGE_PORT", port.to_string())
         .env("BOOKMARK_BRIDGE_EXT_DIR", &ext_dir)
         .env_remove("BOOKMARK_BRIDGE_TOKEN")
