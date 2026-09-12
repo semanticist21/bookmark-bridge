@@ -16,14 +16,69 @@ as a peer and relays through it, so several sessions share one browser.
 Two pieces: this server, and a Chrome extension that dials into it.
 
 **1. Register the server with your MCP client.** It is fetched on first run; no
-Rust needed.
+Rust needed. macOS and Linux only — the server uses `flock` and POSIX file modes.
+
+<details open>
+<summary><b>Claude Code</b></summary>
 
 ```sh
 claude mcp add bookmark-bridge -- npx -y bookmark-bridge
 ```
 
-Your MCP client starts and stops it for you — there is no daemon to run.
-macOS and Linux only: the server uses `flock` and POSIX file modes.
+</details>
+
+<details>
+<summary><b>Codex</b> — <code>~/.codex/config.toml</code></summary>
+
+```toml
+[mcp_servers.bookmark-bridge]
+command = "npx"
+args = ["-y", "bookmark-bridge"]
+```
+
+</details>
+
+<details>
+<summary><b>Any other client</b> — the standard entry</summary>
+
+```json
+{
+  "mcpServers": {
+    "bookmark-bridge": {
+      "command": "npx",
+      "args": ["-y", "bookmark-bridge"]
+    }
+  }
+}
+```
+
+Put it wherever your client keeps its MCP servers.
+
+</details>
+
+<details>
+<summary><b>Or have your agent do it</b> — paste this</summary>
+
+```
+Install the bookmark-bridge MCP server for me.
+
+1. Register it with this client as an MCP server named "bookmark-bridge",
+   running: npx -y bookmark-bridge
+   Use whatever config file this client uses, and do not disturb the servers
+   already there.
+2. Restart or reload so the server is picked up, then call its bridge_status
+   tool and tell me what it reports.
+3. If it says the extension is not connected, tell me to install the Chrome
+   extension from https://github.com/semanticist21/bookmark-bridge and then
+   check again.
+
+It is macOS and Linux only. Do not build from source; the npx package fetches
+a prebuilt binary.
+```
+
+</details>
+
+Your client starts and stops the server for you; there is no daemon to run.
 
 **2. Install the extension.** From the Chrome Web Store, or load `extension/`
 at `chrome://extensions` with developer mode on.
@@ -36,8 +91,10 @@ two find each other.
 
 ```sh
 cd mcp && cargo build --release
-claude mcp add bookmark-bridge -- <repo>/mcp/target/release/bookmark-bridge
 ```
+
+Then point the same config entry at the binary instead:
+`"command": "<repo>/mcp/target/release/bookmark-bridge"`, with no `args`.
 
 A source checkout also gets a shared token automatically: the server writes one
 to `~/.config/bookmark-bridge/token` and copies it into `extension/`, so both
