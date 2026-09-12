@@ -218,7 +218,9 @@ impl Extension {
     async fn attach(port: u16, role: &str) -> Extension {
         let fake = Arc::new(Mutex::new(Fake::seeded()));
         let url = format!("ws://127.0.0.1:{port}");
-        let hello = format!("{role}:");
+        // A role alone becomes "<role>:", but a caller may pass a complete
+        // "ext:<token>" to exercise authentication.
+        let hello = if role.contains(':') { role.to_string() } else { format!("{role}:") };
         // The server may not be listening the instant the process starts.
         let mut ws = None;
         for _ in 0..80 {
@@ -448,4 +450,61 @@ async fn keeps_runtime_state_out_of_the_snapshots() {
     let files: Vec<&str> = std::str::from_utf8(&tracked.stdout).unwrap()
         .lines().collect();
     assert_eq!(files, vec!["tree.json"], "snapshots carry runtime state: {files:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runs_without_a_token_when_the_extension_cannot_be_given_one() {
+    // A Web Store install is read-only, so the server cannot plant a token in
+    // the extension directory. Keeping one anyway would reject that extension
+    // forever. Here no extension directory exists at all, which is that case.
+    let port = lease_port();
+    let home = tempdir::TempDir::new("bb-notoken").expect("temp home");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bookmark-bridge"))
+        .env("HOME", home.path())
+        .env("BOOKMARK_BRIDGE_PORT", port.to_string())
+        .env("BOOKMARK_BRIDGE_EXT_DIR", home.path().join("no-such-extension"))
+        .env_remove("BOOKMARK_BRIDGE_TOKEN")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn");
+    let stdin = child.stdin.take().unwrap();
+    let out = BufReader::new(child.stdout.take().unwrap());
+    let mut s = Server { child, stdin, out, id: 0, home, port };
+
+    // An extension arriving with no token is accepted, and real work goes through.
+    let ext = Extension::attach(port, "ext").await;
+    let (status, _) = s.tool("bridge_status", json!({}));
+    assert_eq!(status["extensionConnected"], true, "a tokenless extension was refused");
+    let (_, is_err) = s.tool("bookmarks_update", json!({"id": "11", "title": "Works"}));
+    assert!(!is_err);
+    assert_eq!(ext.fake.lock().unwrap().get("11").unwrap().1, "Works");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn plants_a_token_when_an_unpacked_extension_is_present() {
+    let port = lease_port();
+    let home = tempdir::TempDir::new("bb-token").expect("temp home");
+    let ext_dir = home.path().join("extension");
+    std::fs::create_dir_all(&ext_dir).unwrap();
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_bookmark-bridge"))
+        .env("HOME", home.path())
+        .env("BOOKMARK_BRIDGE_PORT", port.to_string())
+        .env("BOOKMARK_BRIDGE_EXT_DIR", &ext_dir)
+        .env_remove("BOOKMARK_BRIDGE_TOKEN")
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().expect("spawn");
+    let stdin = child.stdin.take().unwrap();
+    let out = BufReader::new(child.stdout.take().unwrap());
+    let mut s = Server { child, stdin, out, id: 0, home, port };
+    // Force the server to have started before reading what it wrote.
+    s.rpc("initialize", json!({}));
+
+    let planted = std::fs::read_to_string(ext_dir.join("token.txt"))
+        .expect("the token should be readable by the extension");
+    assert!(!planted.trim().is_empty());
+
+    // The extension presenting that token is accepted; a wrong one is not.
+    let _good = Extension::attach(port, &format!("ext:{}", planted.trim())).await;
+    let (status, _) = s.tool("bridge_status", json!({}));
+    assert_eq!(status["extensionConnected"], true, "the planted token was refused");
 }

@@ -119,9 +119,19 @@ impl Bridge {
     }
 }
 
-/// Reads or creates the shared token, and drops a copy into the unpacked
-/// extension directory when one is present.
+/// Establishes the shared token, but only when both sides can actually hold it.
+///
+/// The extension can read a file only from inside its own directory, so the
+/// token can be planted only in an unpacked checkout. A Web Store install is
+/// read-only: planting is impossible there, and a server that kept a token the
+/// extension could never learn would reject it forever. So the rule is simply
+/// "a token exists only if both ends can have one" - otherwise the bridge runs
+/// without one, which the loopback binding already makes reasonable.
+///
+/// Set BOOKMARK_BRIDGE_TOKEN to demand a token regardless, and put the same
+/// value in the extension's storage through its popup.
 fn ensure_token() -> Option<String> {
+    let ext = extension_dir()?;
     let home = std::env::var("HOME").ok()?;
     let dir = std::path::Path::new(&home).join(".config/bookmark-bridge");
     std::fs::create_dir_all(&dir).ok()?;
@@ -129,27 +139,35 @@ fn ensure_token() -> Option<String> {
     let token = match std::fs::read_to_string(&path) {
         Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
         _ => {
-            let t: String = std::fs::read("/dev/urandom").ok()?
-                .into_iter().take(24)
-                .map(|b| format!("{b:02x}")).collect();
+            // Read exactly what is needed. /dev/urandom is an endless character
+            // device: fs::read would never return, growing its buffer until the
+            // machine gave out. Every first run hit that.
+            use std::io::Read;
+            let mut raw = [0u8; 24];
+            std::fs::File::open("/dev/urandom").ok()?.read_exact(&mut raw).ok()?;
+            let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
             std::fs::write(&path, &t).ok()?;
             let _ = std::fs::set_permissions(&path,
                 std::os::unix::fs::PermissionsExt::from_mode(0o600));
             t
         }
     };
-    // An extension can only read files inside its own directory. A packed
-    // install from the Web Store is read-only, so this is best-effort: the
-    // popup can hold the token instead. Override the path with
-    // BOOKMARK_BRIDGE_EXT_DIR.
-    if let Some(ext) = std::env::var("BOOKMARK_BRIDGE_EXT_DIR").ok()
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_exe().ok()
-            .and_then(|p| p.ancestors().nth(4).map(|a| a.join("extension"))))
-    {
-        if ext.is_dir() { let _ = std::fs::write(ext.join("token.txt"), &token); }
-    }
+    // Planting must succeed. If it cannot, no token is better than one only this
+    // side knows.
+    std::fs::write(ext.join("token.txt"), &token).ok()?;
     Some(token)
+}
+
+/// The unpacked extension directory, when there is one. Overridable with
+/// BOOKMARK_BRIDGE_EXT_DIR; otherwise inferred from the binary's location in a
+/// checkout (`<repo>/mcp/target/release/bookmark-bridge`).
+fn extension_dir() -> Option<std::path::PathBuf> {
+    let dir = match std::env::var("BOOKMARK_BRIDGE_EXT_DIR") {
+        Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
+        _ => std::env::current_exe().ok()?
+            .ancestors().nth(4)?.join("extension"),
+    };
+    dir.is_dir().then_some(dir)
 }
 
 fn tools() -> Value {

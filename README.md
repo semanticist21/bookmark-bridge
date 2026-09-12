@@ -17,9 +17,13 @@ as a peer and relays through it, so several sessions share one browser.
 2. Register it: `claude mcp add bookmark-bridge -- <repo>/mcp/target/release/bookmark-bridge`
 3. Load `extension/` at `chrome://extensions` with developer mode on.
 
-The server writes a token to `~/.config/bookmark-bridge/token` and copies it into
-the extension directory, so there is nothing to configure. Set
-`BOOKMARK_BRIDGE_PORT` or `BOOKMARK_BRIDGE_TOKEN` to override.
+There is nothing to configure. From a checkout, the server writes a token to
+`~/.config/bookmark-bridge/token` and copies it into `extension/`, so both ends
+have it. A Web Store install is read-only and cannot receive one, so the server
+runs without a token there and relies on the loopback binding — a token only one
+side knows would reject the extension forever. Set `BOOKMARK_BRIDGE_TOKEN` to
+demand one regardless, and paste the same value into the extension's storage.
+`BOOKMARK_BRIDGE_PORT` changes the port.
 
 ## Safety model
 
