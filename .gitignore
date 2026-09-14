@@ -12,5 +12,5 @@ assets/icon-master.png
 
 .DS_Store
 
-# Store submission package (rebuilt on demand).
-store/
+# Store package, rebuilt from extension/ on demand.
+store/*.zip
