@@ -28,6 +28,10 @@ input:focus-visible{outline:2px solid var(--ok);outline-offset:1px;border-color:
  border-radius:50%;background:#fff;transition:transform .15s}
 .switch:checked{background:var(--ok)}
 .switch:checked::after{transform:translateX(15px)}
+/* Storage answers after the first paint, so the switch would render Off and slide
+   to On every time the popup opens. Keep it hidden and still until it is loaded. */
+body:not([data-ready]) .switch{visibility:hidden}
+body:not([data-ready]) .switch,body:not([data-ready]) .switch::after{transition:none}
 
 
 .row{display:flex;gap:7px;margin-top:18px}

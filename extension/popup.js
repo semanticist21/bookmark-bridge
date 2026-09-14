@@ -51,6 +51,9 @@ async function refresh() {
   const s = await chrome.storage.local.get(['port', 'enabled']);
   $('port').value = s.port || 8787;
   $('enabled').checked = s.enabled !== false;
+  // Flush the checked state before transitions turn on, or it animates anyway.
+  void $('enabled').offsetWidth;
+  document.body.dataset.ready = '';
   refresh();
   setInterval(refresh, 1000);
   $('reconnect').addEventListener('click', async () => {

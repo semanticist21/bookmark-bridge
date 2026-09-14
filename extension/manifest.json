@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bridgey \u2014 Bookmark MCP",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Lets an MCP client read and tidy your bookmarks. Connects only to 127.0.0.1 and never leaves your machine.",
   "permissions": [
     "bookmarks",
