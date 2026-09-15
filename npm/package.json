@@ -1,6 +1,6 @@
 {
   "name": "bookmark-bridge",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Chrome bookmarks as MCP tools, with every change recorded in git so it can be rolled back",
   "license": "MIT",
   "repository": {

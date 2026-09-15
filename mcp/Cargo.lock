@@ -19,7 +19,7 @@ dependencies = [
 
 [[package]]
 name = "bookmark-bridge"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "fs4",
  "futures-util",
