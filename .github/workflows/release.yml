@@ -34,6 +34,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - name: Add target
         run: rustup target add ${{ matrix.target }}
       - name: Build
