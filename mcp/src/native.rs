@@ -246,7 +246,13 @@ async fn serve_client(
     } else if name == "bridge_status" {
         handle_tool(bridge, name, &request["args"]).await
     } else {
-        let _guard = execution.lock().await;
+        // A proxy sends exactly one request and keeps the socket open for its reply.
+        let mut extra = [0u8; 1];
+        let _guard = tokio::select! {
+            biased;
+            _ = socket.read(&mut extra) => return Ok(()),
+            guard = execution.lock() => guard,
+        };
         handle_tool(bridge, name, &request["args"]).await
     };
     let response = match result {
@@ -408,8 +414,8 @@ pub async fn run_host() -> Result<(), String> {
                 if reply.get("result").is_some() == reply["error"].is_string() {
                     reply = json!({"error": "Malformed extension response. Check history_drift before retrying a change."});
                 }
-                if let Some(sender) = bridge.pending.lock().await.remove(&id) {
-                    let _ = sender.send(reply);
+                if let Some(call) = bridge.pending.lock().await.remove(&id) {
+                    let _ = call.sender.send(reply);
                 }
             }
         }

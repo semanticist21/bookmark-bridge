@@ -121,13 +121,18 @@ extension's storage. `BOOKMARK_BRIDGE_PORT` changes the port.
 The v2 server is available on the npm `native` channel. The standard
 `bookmark-bridge` command still installs the legacy server.
 
-1. In your MCP client, change the command arguments from `-y bookmark-bridge`
+1. Open `chrome://extensions` and check the Bridgey extension version. Native
+   Messaging requires **2.0.0 or later**. If you have an older version, keep
+   using the legacy MCP command or [load the unpacked extension](#unpacked-development-extension)
+   before changing your MCP configuration.
+2. In your MCP client, change the command arguments from `-y bookmark-bridge`
    to `-y bookmark-bridge@native`, then restart its MCP connection. With Claude
    Code, the command for a new entry is
    `claude mcp add bookmark-bridge -- npx -y bookmark-bridge@native`.
-2. Open Bridgey's popup and choose **Native Messaging**. Approve Chrome's
+3. Open Bridgey's popup and choose **Native Messaging**. Approve Chrome's
    permission prompt. If setup fails, the extension stays in Legacy mode.
-3. Run `bridge_status` from your MCP client to confirm the connection.
+   Restore the legacy MCP command to reconnect.
+4. Run `bridge_status` from your MCP client to confirm the connection.
 
 The Native npm package contains the prebuilt servers and their checksums.
 The first server startup installs the native host in a user data directory
@@ -140,14 +145,19 @@ Bridgey serves one Native Messaging browser profile at a time. Each profile's
 v2 snapshots live under `native-v2/<profileId>` inside the existing history
 state directory. Legacy snapshots remain available in Legacy mode.
 
-To switch back, choose **Legacy (WebSocket)** in the popup, restore the MCP
-command arguments to `-y bookmark-bridge`, and restart its MCP connection.
+To switch back, choose **Legacy (WebSocket)** if the popup shows a mode
+selector, restore the MCP command arguments to `-y bookmark-bridge`, and
+restart its MCP connection.
 Restarting Chrome or reconnecting the popup refreshes the browser connection.
 Restart the MCP connection after updating the server to refresh its tool list.
 
-For an unpacked development extension, build the v2 binary and run
-`bookmark-bridge register-native <extension-id>` with that binary before
-selecting Native Messaging. It remembers the ID alongside the published one.
+### Unpacked development extension
+
+At `chrome://extensions`, enable Developer mode and load the `extension/`
+directory from this repository at `v2.0.0` or later. Copy the unpacked
+extension's ID and run `npx -y bookmark-bridge@native register-native <extension-id>`
+before selecting Native Messaging. The host remembers this ID alongside the
+published one.
 On macOS and Linux, set `BOOKMARK_BRIDGE_CHROME_USER_DATA_DIR` to the absolute
 user data directory when registering for a Chrome test profile outside the
 default location.

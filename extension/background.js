@@ -215,7 +215,7 @@ function stopConnection() {
 }
 
 function retry() {
-  if (retryTimer || migration) return;
+  if (retryTimer || migration || (state.mode === 'native' && agentDepth)) return;
   retryTimer = setTimeout(() => {
     retryTimer = undefined;
     connect();
@@ -246,6 +246,9 @@ async function connect() {
       const settings = await legacySettings(saved);
       if (attempt === generation) openLegacy(settings);
     } else {
+      // A disconnected host can leave a Chrome operation running. Let its
+      // handler finish before a replacement host can take a new snapshot.
+      if (agentDepth) return;
       if (!(await chrome.permissions.contains(NATIVE_PERMISSION))) {
         if (attempt === generation) setStatus('disconnected', 'permission_required');
         return;
@@ -346,6 +349,7 @@ async function dispatch(request, send) {
   } finally {
     agentDepth--;
     agentUntil = Math.max(agentUntil, Date.now() + 3000);
+    if (!agentDepth && !connection && state.mode === 'native' && state.phase !== 'off') retry();
   }
 }
 
@@ -503,6 +507,7 @@ async function chooseMode(mode) {
     const saved = await readSettings();
     if (change.cancelled) return {ok: false, reason: 'cancelled'};
     if (savedMode(saved) === mode) {
+      if (mode === 'native' && agentDepth) return {ok: false, reason: 'busy'};
       stopConnection();
       return {ok: true};
     }
@@ -560,8 +565,11 @@ async function chooseMode(mode) {
 
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg === 'reconnect') {
-    restart();
-    reply({ok: true});
+    if (state.mode === 'native' && agentDepth) reply({ok: false, reason: 'busy'});
+    else {
+      restart();
+      reply({ok: true});
+    }
   } else if (msg === 'state') {
     reply({...state, switching: Boolean(migration)});
   } else if (msg?.type === 'mode') {

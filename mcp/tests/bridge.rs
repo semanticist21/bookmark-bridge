@@ -5,6 +5,7 @@
 //! bookmarks in memory.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{Shutdown, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
@@ -12,7 +13,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
+use hmac::{Hmac, Mac};
 use serde_json::{json, Value};
+use sha2::Sha256;
 
 const ORIGIN: &str = "chrome-extension://ekokljgbbianihlpahackkfdendobngd/";
 const PROFILE_ID: &str = "00112233445566778899aabbccddeeff";
@@ -115,6 +118,7 @@ struct Fake {
     received_chunks: usize,
     disconnect_after: Option<&'static str>,
     ignore_health: bool,
+    deferred: Option<(&'static str, mpsc::Sender<Value>)>,
 }
 
 impl Fake {
@@ -259,6 +263,44 @@ fn read_frame(reader: &mut impl Read) -> Option<Value> {
     Some(serde_json::from_slice(&body).expect("parse Native Messaging frame"))
 }
 
+fn bookmark_reply(fake: &mut Fake, request: &Value) -> Value {
+    let id = request["id"].as_u64().unwrap();
+    let method = request["method"].as_str().unwrap();
+    match fake.handle(method, &request["params"]) {
+        Ok(result) => json!({"id": id, "result": result}),
+        Err(error) => json!({"id": id, "error": error}),
+    }
+}
+
+fn authenticated_client(profile: &Path) -> TcpStream {
+    let registration = if cfg!(target_os = "macos") {
+        profile.join("Library/Application Support/Bridgey/native-v2")
+    } else if cfg!(windows) {
+        profile.join("Bridgey/native-v2")
+    } else {
+        profile.join(".local/share/bridgey/native-v2")
+    };
+    let endpoint: Value = serde_json::from_slice(
+        &std::fs::read(registration.join("endpoint.json")).unwrap(),
+    ).unwrap();
+    let port = u16::try_from(endpoint["port"].as_u64().unwrap()).unwrap();
+    let secret: [u8; 32] = serde_json::from_value(endpoint["secret"].clone()).unwrap();
+    let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    socket.set_read_timeout(Some(WAIT)).unwrap();
+    let nonce = [7u8; 32];
+    write_frame(&mut socket, &json!({"protocol": 2, "nonce": nonce}));
+    let challenge = read_frame(&mut socket).unwrap();
+    let host_nonce: [u8; 32] = serde_json::from_value(challenge["nonce"].clone()).unwrap();
+    let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
+    mac.update(b"bridgey-native-v2/client");
+    mac.update(&nonce);
+    mac.update(&host_nonce);
+    let proof: [u8; 32] = mac.finalize().into_bytes().into();
+    write_frame(&mut socket, &json!({"proof": proof}));
+    assert_eq!(read_frame(&mut socket), Some(json!({"authenticated": true})));
+    socket
+}
+
 fn start_host(profile: &Path) -> (Process, ChildStdin, Receiver<Value>) {
     let mut child = process_for(profile).arg(ORIGIN).spawn().expect("spawn Chrome host");
     let stdin = child.stdin.take().unwrap();
@@ -278,6 +320,7 @@ fn start_host(profile: &Path) -> (Process, ChildStdin, Receiver<Value>) {
 struct Extension {
     process: Option<Process>,
     fake: Arc<Mutex<Fake>>,
+    input: Arc<Mutex<Option<ChildStdin>>>,
     task: Option<JoinHandle<()>>,
 }
 
@@ -293,6 +336,8 @@ impl Extension {
 
         let fake = Arc::new(Mutex::new(Fake::seeded()));
         let mine = fake.clone();
+        let input = Arc::new(Mutex::new(Some(stdin)));
+        let writer = input.clone();
         let task = thread::spawn(move || {
             while let Ok(message) = messages.recv() {
                 let request = match message["type"].as_str() {
@@ -322,25 +367,38 @@ impl Extension {
                 let method = request["method"].as_str().unwrap();
                 if method == "__bridgey_health" {
                     if !mine.lock().unwrap().ignore_health {
-                        write_frame(&mut stdin, &json!({"id": id, "result": true}));
+                        write_frame(writer.lock().unwrap().as_mut().unwrap(), &json!({"id": id, "result": true}));
                     }
                     continue;
                 }
                 let mut fake = mine.lock().unwrap();
-                let result = fake.handle(method, &request["params"]);
+                if fake.deferred.as_ref().is_some_and(|(name, _)| *name == method) {
+                    let (_, send) = fake.deferred.take().unwrap();
+                    send.send(request).unwrap();
+                    continue;
+                }
+                let reply = bookmark_reply(&mut fake, &request);
                 if fake.disconnect_after == Some(method) {
                     // Simulate Chrome applying a write and disappearing before its reply.
+                    drop(writer.lock().unwrap().take());
                     break;
                 }
                 drop(fake);
-                let reply = match result {
-                    Ok(r) => json!({"id": id, "result": r}),
-                    Err(e) => json!({"id": id, "error": e}),
-                };
-                write_frame(&mut stdin, &reply);
+                write_frame(writer.lock().unwrap().as_mut().unwrap(), &reply);
             }
         });
-        Extension { process: Some(process), fake, task: Some(task) }
+        Extension { process: Some(process), fake, input, task: Some(task) }
+    }
+
+    fn defer_next(&self, method: &'static str) -> Receiver<Value> {
+        let (send, request) = mpsc::channel();
+        self.fake.lock().unwrap().deferred = Some((method, send));
+        request
+    }
+
+    fn complete(&self, request: &Value) {
+        let reply = bookmark_reply(&mut self.fake.lock().unwrap(), request);
+        write_frame(self.input.lock().unwrap().as_mut().unwrap(), &reply);
     }
 }
 
@@ -678,4 +736,76 @@ fn an_interrupted_mutation_is_not_replayed_and_keeps_its_backup() {
     let snapshot = String::from_utf8(snapshot.stdout).unwrap();
     assert!(snapshot.contains("Docs"));
     assert!(!snapshot.contains("Applied before loss"));
+}
+
+#[test]
+fn disconnect_cancels_only_the_request_still_waiting_for_admission() {
+    let mut observer = Server::start();
+    let ext = Extension::attach(&observer);
+    let held = ext.defer_next("update");
+    let mut admitted = authenticated_client(observer.profile.path());
+    write_frame(&mut admitted, &json!({
+        "name": "bookmarks_update", "args": {"id": "11", "title": "Already admitted"},
+    }));
+    let in_flight = held.recv_timeout(WAIT).expect("admitted update");
+    admitted.shutdown(Shutdown::Write).unwrap();
+
+    let mut queued = authenticated_client(observer.profile.path());
+    write_frame(&mut queued, &json!({
+        "name": "bookmarks_update", "args": {"id": "12", "title": "Must not apply"},
+    }));
+    queued.shutdown(Shutdown::Write).unwrap();
+    ext.complete(&in_flight);
+    if let Some(reply) = read_frame(&mut queued) {
+        assert!(reply["error"].is_string(), "{reply}");
+    }
+
+    let (log, is_err) = observer.tool("history_log", json!({}));
+    assert!(!is_err, "{log}");
+    let commits = log["snapshots"].as_array().unwrap();
+    assert_eq!(commits.len(), 2, "{log}");
+    assert_eq!(commits[0]["label"], "after: bookmarks_update", "{log}");
+    let fake = ext.fake.lock().unwrap();
+    assert_eq!(fake.get("11").unwrap().1, "Already admitted");
+    assert_eq!(fake.get("12").unwrap().1, "Notes");
+    assert_eq!(fake.calls, ["tree", "update", "tree"]);
+}
+
+#[test]
+fn a_timed_out_mutation_fences_new_writes_until_chrome_replies() {
+    let mut s = Server::start();
+    let ext = Extension::attach(&s);
+    let (out, is_err) = s.tool("bookmarks_update", json!({"id": "11", "title": "Baseline"}));
+    assert!(!is_err, "{out}");
+    let (log, is_err) = s.tool("history_log", json!({}));
+    assert!(!is_err, "{log}");
+    let commit = log["snapshots"][0]["commit"].as_str().unwrap();
+
+    let held = ext.defer_next("update");
+    let (out, is_err) = s.tool("bookmarks_update", json!({"id": "11", "title": "Late update"}));
+    assert!(is_err && out.as_str().unwrap_or_default().contains("unknown"), "{out}");
+    let late = held.recv_timeout(WAIT).expect("timed-out update");
+
+    let (drift, is_err) = s.tool("history_drift", json!({}));
+    assert!(!is_err, "{drift}");
+    assert_eq!(drift["count"], 0, "{drift}");
+    assert_eq!(drift["unreliable"], true, "{drift}");
+    assert!(drift["pendingOp"].as_str().unwrap().contains("Late update"), "{drift}");
+    for (name, args) in [
+        ("bookmarks_update", json!({"id": "12", "title": "Fenced update"})),
+        ("history_restore", json!({"commit": commit})),
+    ] {
+        let (out, is_err) = s.tool(name, args);
+        assert!(is_err && out.as_str().unwrap_or_default().contains("still running"), "{name}: {out}");
+    }
+    assert_eq!(ext.fake.lock().unwrap().get("12").unwrap().1, "Notes");
+
+    ext.complete(&late);
+    // The health response follows the late mutation reply on the same native pipe.
+    s.status(true);
+    let (out, is_err) = s.tool("bookmarks_update", json!({"id": "12", "title": "After reply"}));
+    assert!(!is_err, "{out}");
+    let fake = ext.fake.lock().unwrap();
+    assert_eq!(fake.get("11").unwrap().1, "Late update");
+    assert_eq!(fake.get("12").unwrap().1, "After reply");
 }

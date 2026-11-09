@@ -61,13 +61,26 @@ impl From<CallError> for String {
     fn from(e: CallError) -> String { e.to_string() }
 }
 
+struct PendingCall {
+    sender: oneshot::Sender<Value>,
+    mutates: bool,
+}
+
 struct Bridge {
-    pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
+    pending: Mutex<HashMap<u64, PendingCall>>,
     outbox: tokio::sync::mpsc::UnboundedSender<(u64, String)>,
     next_id: std::sync::atomic::AtomicU64,
 }
 
+fn is_bookmark_mutation(method: &str) -> bool {
+    matches!(method, "update" | "move" | "create" | "remove" | "removeTree" | "batch")
+}
+
 impl Bridge {
+    async fn has_pending_mutation(&self) -> bool {
+        self.pending.lock().await.values().any(|call| call.mutates)
+    }
+
     async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
         let n_ops = params.get("ops").and_then(Value::as_array).map_or(0, Vec::len);
         self.call_with_budget(method, params, Duration::from_secs(20 + n_ops as u64 / 5)).await
@@ -82,7 +95,8 @@ impl Bridge {
             return Err(CallError::TooLarge);
         }
         let (done_tx, done_rx) = oneshot::channel();
-        self.pending.lock().await.insert(id, done_tx);
+        let mutates = is_bookmark_mutation(method);
+        self.pending.lock().await.insert(id, PendingCall { sender: done_tx, mutates });
         if self.outbox.send((id, frame)).is_err() {
             self.pending.lock().await.remove(&id);
             return Err(CallError::SendFailed);
@@ -97,7 +111,10 @@ impl Bridge {
             }
             Ok(Err(_)) => Err(CallError::Cancelled),
             Err(_) => {
-                self.pending.lock().await.remove(&id);
+                // The caller timed out, but Chrome can still be changing bookmarks.
+                if !mutates {
+                    self.pending.lock().await.remove(&id);
+                }
                 Err(CallError::Timeout(budget.as_secs()))
             }
         }
@@ -153,6 +170,11 @@ async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, Stri
         }
         return Ok(status);
     }
+    let mutates = name == "history_restore"
+        || name.strip_prefix("bookmarks_").is_some_and(is_bookmark_mutation);
+    if mutates && b.has_pending_mutation().await {
+        return Err("A previous bookmark change is still running in Chrome. Wait for it to finish, then run history_drift before retrying.".into());
+    }
     if let Some(cmd) = name.strip_prefix("history_") {
         // restore mutates; it is not a read. It needs the same protection as the
         // other mutating tools so agent-head ends up pointing at the restored
@@ -194,7 +216,7 @@ async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, Stri
         }
     }
     // Every mutating tool records the prior state first, so a mistake can be undone.
-    if matches!(method, "update" | "move" | "create" | "remove" | "removeTree" | "batch") {
+    if mutates {
         let label = format!("before: {name} {}", compact(args));
         // Without a snapshot the change cannot be undone. Refuse rather than make
         // one. Passing force:true is the explicit way to override.
@@ -479,6 +501,7 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
         }
         "drift" => {
             let marker = dirty_marker();
+            let unsettled = b.has_pending_mutation().await;
             let mut unreliable = marker.exists();
             let pending = std::fs::read_to_string(&marker).unwrap_or_default();
             let base = git(&["show", "agent-head:tree.json"]).ok();
@@ -489,8 +512,10 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
             let mut dargs = args.clone();
             if let Some(o) = dargs.as_object_mut() {
                 o.insert("since".into(), json!(agent_head_at()));
-                // Only an explicit history_drift {clear:true} purges it.
-                o.entry("clear").or_insert(json!(false));
+                // Keep the evidence while Chrome can still be changing bookmarks.
+                if unsettled {
+                    o.insert("clear".into(), json!(false));
+                }
             }
             let ledger = b.call("drift", dargs).await.unwrap_or(Value::Null);
             let Some(base) = base else {
@@ -549,10 +574,8 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
                         "url":r.url,"parentId":r.parent}));
                 }
             }
-            // A marker with a tree identical to the baseline means the operation never
-            // applied. That is now established, so clear it - otherwise one timeout
-            // disables drift detection forever.
-            if unreliable && changes.is_empty() {
+            // Only a settled operation can be compared against the baseline.
+            if unreliable && !unsettled && changes.is_empty() {
                 let _ = std::fs::remove_file(&marker);
                 unreliable = false;
             }

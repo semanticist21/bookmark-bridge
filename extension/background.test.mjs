@@ -26,6 +26,7 @@ function extension(saved = {}, permission = true) {
   const permissionsRemoved = event();
   let nextTimer = 0;
   let nativeCommit;
+  let bookmarkUpdate;
 
   class Socket {
     static OPEN = 1;
@@ -56,7 +57,11 @@ function extension(saved = {}, permission = true) {
       action: {setBadgeText: async () => {}, setTitle: async () => {}},
       bookmarks: {
         ...bookmarkEvents,
-        search: async (query) => { queries.push(query); return [{id: '11'}]; }
+        search: async (query) => { queries.push(query); return [{id: '11'}]; },
+        update: async (id, patch) => {
+          await bookmarkUpdate;
+          return {id, ...patch};
+        }
       },
       permissions: {contains: async () => permission, onRemoved: permissionsRemoved},
       runtime: {
@@ -96,6 +101,12 @@ function extension(saved = {}, permission = true) {
       nativeCommit = new Promise((resolve) => { resume = resolve; });
       return resume;
     },
+    pauseBookmarkUpdate() {
+      let resume;
+      bookmarkUpdate = new Promise((resolve) => { resume = resolve; });
+      return resume;
+    },
+    wake() { runtime.onStartup.emit(); },
     revoke() { permission = false; permissionsRemoved.emit({permissions: ['nativeMessaging']}); }
   };
 }
@@ -224,4 +235,35 @@ test('permission revoked during initial Native persistence cancels opt-in and di
   assert.deepEqual(ext.queries, []);
   assert.equal(ext.saved.connectionMode, 'legacy');
   assert.equal(ext.sockets.length, 2);
+});
+
+test('Native reconnect waits for a Chrome bookmark update after its original host disconnects', async () => {
+  const ext = extension({connectionMode: 'native', nativeProfileId: profileId});
+  await tick();
+  const [native] = ext.ports;
+  native.onMessage.emit({type: 'prepared'});
+  await tick();
+  native.onMessage.emit({type: 'ready'});
+  await tick();
+
+  const finish = ext.pauseBookmarkUpdate();
+  native.onMessage.emit({type: 'request', request: {id: 1, method: 'update', params: {id: '11', title: 'New'}}});
+  assert.deepEqual(copy(await ext.send({type: 'mode', mode: 'native'})), {ok: false, reason: 'busy'});
+  assert.deepEqual(copy(await ext.send('reconnect')), {ok: false, reason: 'busy'});
+  assert.equal(native.closed, false);
+
+  native.disconnect();
+  ext.wake();
+  await tick();
+  assert.equal(ext.ports.length, 1);
+  assert.equal(ext.timers.size, 0);
+
+  finish();
+  await tick();
+  assert.equal(native.sent.some(({id}) => id === 1), false);
+  const [retry] = ext.timers.values();
+  retry.callback();
+  await tick();
+  assert.equal(ext.ports.length, 2);
+  assert.deepEqual(ext.ports[1].sent, [{type: 'prepare', profileId}]);
 });
