@@ -22,8 +22,7 @@ Bridgey — Bookmark MCP
 
 **요약 (132자 이내)**
 ```
-Lets a local MCP client read and tidy your bookmarks. Connects only to
-127.0.0.1 and never leaves your machine.
+Lets a local MCP client read and tidy your Chrome bookmarks. All communication stays on your computer.
 ```
 
 **카테고리**: Workflow & Planning
@@ -32,9 +31,9 @@ Lets a local MCP client read and tidy your bookmarks. Connects only to
 **상세 설명**
 ```
 An MCP client running on your computer can read and reorganize your Chrome
-bookmarks through this extension. It connects only to 127.0.0.1 and turns away
-anything that came from a web page, so your bookmarks never go further than
-your own machine.
+bookmarks through this extension. Choose between the existing local WebSocket
+connection and Chrome Native Messaging. Both keep your bookmark data on your
+computer.
 
 Ask your client to find the bookmarks you half remember, strip the site names
 that pile up in titles, pull a folder apart, or merge two that drifted. Before
@@ -77,25 +76,30 @@ no function at all.
 
 **`storage`**
 ```
-Stores the user's chosen port number and the on/off switch, plus a capped local
-record of recent bookmark events. That record exists so the extension can tell
-which changes the user made themselves, and therefore avoid overwriting them.
-It never leaves the browser profile.
+Stores the selected connection mode, local settings and a random ID that keeps
+Native Messaging history separate for each browser profile. Also keeps a capped
+local record of recent bookmark events so the MCP client can identify user edits
+before making changes. All of this stays on the user's computer.
+```
+
+**optional `nativeMessaging`**
+```
+Requested only when the user chooses Native Messaging in Bridgey's popup. It
+connects the extension to the registered Bridgey host installed by the local
+MCP server. It exchanges bookmark requests and results with that host.
 ```
 
 **host permission `ws://127.0.0.1/*`**
 ```
-The loopback address, which is the user's own computer. The extension opens a WebSocket
-to the local MCP server the user installed. It connects nowhere else, and it
-rejects handshakes carrying an http(s) origin so a web page cannot impersonate
-that server.
+Used in Legacy mode to connect the extension to the local MCP server over the
+user's own loopback address. The server rejects connections from web pages.
 ```
 
 **원격 코드 사용**: 아니요
 ```
 All JavaScript ships in the package. It loads no external scripts and does not
-use eval. What arrives over the WebSocket is JSON data, handled only by a fixed
-list of handlers.
+use eval. Both local transports carry JSON data handled by a fixed set of
+bookmark operations.
 ```
 
 ---
@@ -104,7 +108,7 @@ list of handlers.
 
 **개인정보처리방침 URL**
 ```
-https://kkom.net/terms/bookmark-bridge/privacy
+https://github.com/semanticist21/bookmark-bridge/blob/main/PRIVACY.md
 ```
 
 **수집 데이터 신고**: 아무것도 선택하지 않음 (수집 없음)

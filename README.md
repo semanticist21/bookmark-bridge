@@ -13,7 +13,8 @@ and relays through it, so several sessions share one browser.
 
 ## Install
 
-Two pieces: this server, and the Chrome extension that dials into it.
+The default package uses the existing WebSocket connection. For the opt-in
+Native Messaging release, see [Native Messaging](#native-messaging).
 
 **1. Register the server with your MCP client.** It downloads itself on first
 run, so you do not need Rust. macOS, Linux and Windows.
@@ -80,8 +81,9 @@ Do not build from source; the npx package fetches a prebuilt binary.
 Your client starts and stops it for you. Nothing to leave running. `git` must be
 on PATH — the snapshots are a real git repository.
 
-**2. Install the extension.** From the Chrome Web Store, or load `extension/`
-at `chrome://extensions` with developer mode on.
+**2. Install the extension.** Get [Bridgey from the Chrome Web Store](https://chromewebstore.google.com/detail/ekokljgbbianihlpahackkfdendobngd)
+and leave its mode set to **Legacy (WebSocket)**. For the unpacked legacy
+extension, use `extension/` from the `v0.1.2` tag.
 
 That is all of it. The extension's popup goes green once the two find each other.
 
@@ -93,7 +95,9 @@ touch a bookmark, and when you open its popup. If an agent reports that the
 extension is not connected, clicking the toolbar icon reconnects it.
 
 <details>
-<summary>From source instead</summary>
+<summary>Build the legacy server from source</summary>
+
+Use the `v0.1.2` tag for the legacy server.
 
 ```sh
 cd mcp && cargo build --release
@@ -111,6 +115,41 @@ only one side knows would reject the extension forever. Set
 extension's storage. `BOOKMARK_BRIDGE_PORT` changes the port.
 
 </details>
+
+## Native Messaging
+
+The v2 server is available on the npm `native` channel. The standard
+`bookmark-bridge` command still installs the legacy server.
+
+1. In your MCP client, change the command arguments from `-y bookmark-bridge`
+   to `-y bookmark-bridge@native`, then restart its MCP connection. With Claude
+   Code, the command for a new entry is
+   `claude mcp add bookmark-bridge -- npx -y bookmark-bridge@native`.
+2. Open Bridgey's popup and choose **Native Messaging**. Approve Chrome's
+   permission prompt. If setup fails, the extension stays in Legacy mode.
+3. Run `bridge_status` from your MCP client to confirm the connection.
+
+The first server startup installs the native host in a user data directory
+outside the npm cache and registers it with Chrome. Chrome launches that host
+when the extension connects. The host and the MCP process communicate over an
+authenticated loopback connection. Keep `git` on the MCP client's PATH. The
+server remembers its absolute path so the Chrome-launched host can use it.
+
+Bridgey serves one Native Messaging browser profile at a time. Each profile's
+v2 snapshots live under `native-v2/<profileId>` inside the existing history
+state directory. Legacy snapshots remain available in Legacy mode.
+
+To switch back, choose **Legacy (WebSocket)** in the popup, restore the MCP
+command arguments to `-y bookmark-bridge`, and restart its MCP connection.
+Restarting Chrome or reconnecting the popup refreshes the browser connection.
+Restart the MCP connection after updating the server to refresh its tool list.
+
+For an unpacked development extension, build the v2 binary and run
+`bookmark-bridge register-native <extension-id>` with that binary before
+selecting Native Messaging. It remembers the ID alongside the published one.
+On macOS and Linux, set `BOOKMARK_BRIDGE_CHROME_USER_DATA_DIR` to the absolute
+user data directory when registering for a Chrome test profile outside the
+default location.
 
 ## Safety model
 
@@ -156,20 +195,16 @@ Read these before trusting the output.
 
 ## Tests
 
-`cd mcp && cargo test` runs the real binary against a fake extension: a
-WebSocket client holding an in-memory tree. The destructive paths are covered
-without a browser, including restoring a deleted subtree under new ids, refusing
-to mutate when no snapshot can be taken, and two sessions sharing one extension
-through the peer relay.
-
-Two release-blocking defects came out of writing these, both invisible on a
-machine that had already been set up once.
+`cd mcp && cargo test --locked` exercises the MCP server against a fake browser
+extension with an in-memory tree. The test harness uses temporary state and
+does not read your real Chrome bookmarks.
 
 ## Tools
 
 | | |
 | --- | --- |
 | `bookmarks_tree` `_search` `_children` | read |
+| `bookmarks_find_duplicates` | groups identical URLs and lists each bookmark's ID, title and parent folder ID; pass `folderId` to scan a folder and its descendants |
 | `bookmarks_update` `_move` `_create` `_remove` `_removeTree` | single change, each accepts `expect` |
 | `bookmarks_batch` | up to 200 changes at once, per-item `expect` |
 | `history_log` `_restore` `_drift` | snapshots, rollback, what changed since the agent last ran |
@@ -177,11 +212,10 @@ machine that had already been set up once.
 
 ## Privacy
 
-The extension holds `bookmarks` and `storage`. It connects only to
-`127.0.0.1` and turns away handshakes carrying an `http(s)` origin, so a web page
-cannot reach it. Nothing goes anywhere else. The token stops a page; it does not
-stop another process on this machine, which can read the token file just as
-easily.
+The extension holds `bookmarks` and `storage`. Native Messaging also requires
+an optional permission and uses Chrome's extension allowlist. Legacy mode uses
+`127.0.0.1` and rejects handshakes carrying a web origin. Both transports keep
+bookmark data on this computer.
 
 ## License
 

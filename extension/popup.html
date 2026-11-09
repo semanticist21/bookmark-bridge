@@ -7,24 +7,24 @@
 
   <ul class="lights">
     <li><span class="dot" id="dotWorker"></span><span class="k">Service worker</span><span class="v" id="vWorker">—</span></li>
-    <li><span class="dot" id="dotSocket"></span><span class="k">Bridge</span><span class="v" id="vSocket">—</span></li>
+    <li><span class="dot" id="dotSocket"></span><span class="k">Bridge</span><span class="v" id="vSocket" role="status">—</span></li>
   </ul>
 
   <dl class="fields">
-    <dt><label for="port">Port</label></dt>
-    <dd><input id="port" type="number" min="1" max="65535" inputmode="numeric"></dd>
+    <dt><label for="mode">Mode</label></dt>
+    <dd><select id="mode" disabled>
+      <option value="legacy">Legacy (WebSocket)</option>
+      <option value="native">Native Messaging</option>
+    </select></dd>
+    <dt id="portLabel"><label for="port">Port</label></dt>
+    <dd id="portField"><input id="port" type="number" min="1" max="65535" inputmode="numeric"></dd>
     <dt><label for="enabled">Enabled</label></dt>
     <dd><input id="enabled" type="checkbox" class="switch" role="switch"></dd>
   </dl>
 
-  <!-- Only shown while nothing is listening. Without it, a fresh install just
-       says "Disconnected" and never explains that a local server is the other
-       half of this. -->
   <p class="hint" id="hint" hidden>
-    Nothing is listening on this port. If your MCP client is running, opening
-    this popup has just retried — give it a second. Otherwise register the
-    server with your client:
-    <code>npx -y bookmark-bridge</code>
+    <span id="hintText" role="status"></span>
+    <code id="setupCommand" hidden></code>
     <a id="help" href="https://github.com/semanticist21/bookmark-bridge#install"
        target="_blank" rel="noreferrer">Setup guide</a>
   </p>

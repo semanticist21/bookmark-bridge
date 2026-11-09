@@ -1,6 +1,6 @@
 {
   "name": "bookmark-bridge",
-  "version": "0.1.2",
+  "version": "2.0.0",
   "description": "Chrome bookmarks as MCP tools, with every change recorded in git so it can be rolled back",
   "license": "MIT",
   "repository": {
@@ -15,6 +15,12 @@
     "bin/",
     "README.md"
   ],
+  "scripts": {
+    "prepublishOnly": "node -e \"if (process.env.npm_config_tag !== 'native') { console.error('Publish this version with npm publish --tag native.'); process.exit(1); }\""
+  },
+  "publishConfig": {
+    "tag": "native"
+  },
   "engines": {
     "node": ">=18"
   },

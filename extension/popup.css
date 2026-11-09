@@ -18,10 +18,12 @@ h1{font-size:15px;font-weight:650;margin:0 0 10px;letter-spacing:-.01em}
 .fields{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px 14px;margin:0}
 dt{color:var(--muted);font-size:13px}
 dd{margin:0;display:flex;align-items:center;gap:10px}
-input[type=number],input[type=password]{width:100%;max-width:92px;padding:6px 9px;
+input[type=number],select{width:100%;padding:6px 9px;
  border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);
  font:inherit;font-size:13px;font-variant-numeric:tabular-nums}
-input:focus-visible{outline:2px solid var(--ok);outline-offset:1px;border-color:transparent}
+input[type=number]{max-width:92px}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--ok);outline-offset:1px}
+[hidden]{display:none!important}
 .switch{appearance:none;width:36px;height:21px;border-radius:11px;background:var(--off);
  border:0;position:relative;cursor:pointer;transition:background .15s;flex:none}
 .switch::after{content:"";position:absolute;top:2.5px;left:2.5px;width:16px;height:16px;

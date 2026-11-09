@@ -9,11 +9,23 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - name: Test
         working-directory: mcp
+        env:
+          BOOKMARK_BRIDGE_SKIP_REGISTRATION: '1'
         run: cargo test --locked
+      - name: Test Chrome native host registration
+        run: node .github/scripts/check-native-registration.mjs
       - name: Check extension syntax
         run: node --check extension/background.js && node --check extension/popup.js
+      - name: Test extension connection
+        run: node --test extension/background.test.mjs
+      - name: Check npm launcher syntax
+        run: node --check npm/bin/bookmark-bridge.mjs

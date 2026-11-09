@@ -6,7 +6,6 @@ import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {createWriteStream} from 'node:fs';
 import {chmod, mkdir, mkdtemp, readFile, rename, rm, stat} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
 import {dirname, join} from 'node:path';
 import {pipeline} from 'node:stream/promises';
 import {fileURLToPath} from 'node:url';
@@ -62,7 +61,8 @@ async function install() {
   if (!line) die(`no checksum published for ${name} in ${tag}`);
   const expected = line.trim().split(/\s+/)[0];
 
-  const staging = await mkdtemp(join(tmpdir(), 'bookmark-bridge-'));
+  await mkdir(dirname(cacheDir), {recursive: true});
+  const staging = await mkdtemp(join(dirname(cacheDir), '.install-'));
   const archive = join(staging, name);
   try {
     await pipeline(
@@ -82,13 +82,11 @@ async function install() {
       tar.on('exit', (code) => code === 0 ? resolve() : reject(new Error(`tar exited ${code}`)));
     });
 
-    await mkdir(dirname(cacheDir), {recursive: true});
-    // Rename is atomic, so two clients starting at once cannot see a half-written
-    // directory.
-    await rm(cacheDir, {recursive: true, force: true});
-    await rename(join(staging, `bookmark-bridge-${target}`), cacheDir);
-    // Windows has no execute bit; the archive already carries it elsewhere.
-    if (process.platform !== 'win32') await chmod(binary, 0o755);
+    const unpacked = join(staging, `bookmark-bridge-${target}`);
+    if (process.platform !== 'win32') await chmod(join(unpacked, `bookmark-bridge${EXE}`), 0o755);
+    // Publish the whole directory. Another client may already have installed it.
+    try { await rename(unpacked, cacheDir); }
+    catch (e) { if (!(await exists(binary))) throw e; }
   } finally {
     await rm(staging, {recursive: true, force: true});
   }

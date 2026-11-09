@@ -1,24 +1,18 @@
-//! Exposes Chrome bookmarks as MCP tools.
-//!
-//! An extension cannot listen on a port, so the direction is inverted: this
-//! process runs a WebSocket server on loopback and the extension dials in.
-//! MCP clients attach over stdio.
-//!
-//!   MCP client --stdio--> this process <--ws(127.0.0.1)-- Chrome extension
-//!
-//! Every bookmark change goes through the extension's chrome.bookmarks API.
-//! Editing Chrome's Bookmarks file directly gets reverted by Chrome Sync.
+//! Bridgey v2 MCP proxy and bookmark tools executed by the Chrome native host.
 
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{oneshot, Mutex};
 
-type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
-type Outbox = Arc<Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>>;
+mod native;
+mod registration;
+
+static STATE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 const PROTOCOL: &str = "2024-11-05";
 
@@ -27,10 +21,10 @@ const PROTOCOL: &str = "2024-11-05";
 /// was touched, and only then is it safe to clear the dirty marker.
 #[derive(Debug)]
 enum CallError {
-    /// No extension is attached. The frame was never queued.
-    NotConnected,
     /// The connection dropped before the frame could be queued.
     SendFailed,
+    /// The request exceeds the bridge limit and was never queued.
+    TooLarge,
     /// The reply channel closed; the extension reconnected mid-flight.
     Cancelled,
     /// No reply within the budget. The change may or may not have landed.
@@ -42,23 +36,18 @@ enum CallError {
 impl CallError {
     /// True when the request demonstrably never reached Chrome.
     fn never_sent(&self) -> bool {
-        matches!(self, CallError::NotConnected | CallError::SendFailed)
+        matches!(self, CallError::SendFailed | CallError::TooLarge)
     }
 }
 
 impl std::fmt::Display for CallError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CallError::NotConnected => f.write_str(
-                "The Chrome extension is not connected. Its service worker sleeps \
-                 when idle and is not woken on a timer, so this is normal after a \
-                 quiet period. Ask the user to click the extension's toolbar icon, \
-                 which wakes it and reconnects, then try again. If that does not \
-                 help, the extension may not be loaded or the port may not match."),
             CallError::SendFailed => f.write_str(
                 "The extension disconnected before the request was sent. Nothing was changed."),
+            CallError::TooLarge => f.write_str("The request exceeds Bridgey's 64 MiB limit."),
             CallError::Cancelled => f.write_str(
-                "The extension reconnected while this request was in flight. \
+                "The extension disconnected while this request was in flight. \
                  Whether it was applied is unknown - run history_drift before retrying."),
             CallError::Timeout(secs) => write!(f,
                 "The extension did not reply within {secs}s. Whether the change was \
@@ -73,41 +62,34 @@ impl From<CallError> for String {
 }
 
 struct Bridge {
-    pending: Pending,
-    outbox: Outbox,
-    /// Generation of the connection that owns `outbox`, so a closing old
-    /// connection cannot tear down a newer one.
-    epoch: std::sync::atomic::AtomicU64,
-    next_id: Mutex<u64>,
-    token: String,
+    pending: Mutex<HashMap<u64, oneshot::Sender<Value>>>,
+    outbox: tokio::sync::mpsc::UnboundedSender<(u64, String)>,
+    next_id: std::sync::atomic::AtomicU64,
 }
 
 impl Bridge {
-    /// Sends a command to the extension and waits for its reply. Fails fast
-    /// when no extension is attached.
     async fn call(&self, method: &str, params: Value) -> Result<Value, CallError> {
-        let n_ops = params.get("ops").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
-        let tx = {
-            let guard = self.outbox.lock().await;
-            guard.clone().ok_or(CallError::NotConnected)?
-        };
-        let id = {
-            let mut n = self.next_id.lock().await;
-            *n += 1;
-            *n
-        };
+        let n_ops = params.get("ops").and_then(Value::as_array).map_or(0, Vec::len);
+        self.call_with_budget(method, params, Duration::from_secs(20 + n_ops as u64 / 5)).await
+    }
+
+    async fn call_with_budget(
+        &self, method: &str, params: Value, budget: Duration,
+    ) -> Result<Value, CallError> {
+        let id = self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let frame = json!({"id": id, "method": method, "params": params}).to_string();
+        if frame.len() > native::CHROME_INPUT_LIMIT {
+            return Err(CallError::TooLarge);
+        }
         let (done_tx, done_rx) = oneshot::channel();
         self.pending.lock().await.insert(id, done_tx);
-        let frame = json!({"id": id, "method": method, "params": params}).to_string();
-        tx.send(frame).map_err(|_| CallError::SendFailed)?;
-
-        // A batch takes as long as it has items. A flat 20s budget cuts large
-        // jobs short while the extension keeps applying them, so a retry would
-        // duplicate work.
-        let budget = std::time::Duration::from_secs(20 + n_ops as u64 / 5);
+        if self.outbox.send((id, frame)).is_err() {
+            self.pending.lock().await.remove(&id);
+            return Err(CallError::SendFailed);
+        }
         match tokio::time::timeout(budget, done_rx).await {
             Ok(Ok(v)) => {
-                if let Some(err) = v.get("error").and_then(|e| e.as_str()) {
+                if let Some(err) = v.get("error").and_then(Value::as_str) {
                     Err(CallError::Extension(err.to_string()))
                 } else {
                     Ok(v.get("result").cloned().unwrap_or(Value::Null))
@@ -122,51 +104,6 @@ impl Bridge {
     }
 }
 
-/// Establishes the shared token, but only when both sides can actually hold it.
-///
-/// The extension can read a file only from inside its own directory, so the
-/// token can be planted only in an unpacked checkout. A Web Store install is
-/// read-only: planting is impossible there, and a server that kept a token the
-/// extension could never learn would reject it forever. So the rule is simply
-/// "a token exists only if both ends can have one" - otherwise the bridge runs
-/// without one, which the loopback binding already makes reasonable.
-///
-/// Set BOOKMARK_BRIDGE_TOKEN to demand a token regardless, and put the same
-/// value in the extension's storage through its popup.
-fn ensure_token() -> Option<String> {
-    let ext = extension_dir()?;
-    let dir = config_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("token");
-    let token = match std::fs::read_to_string(&path) {
-        Ok(t) if !t.trim().is_empty() => t.trim().to_string(),
-        _ => {
-            let mut raw = [0u8; 24];
-            getrandom::fill(&mut raw).ok()?;
-            let t: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-            std::fs::write(&path, &t).ok()?;
-            owner_only(&path);
-            t
-        }
-    };
-    // Planting must succeed. If it cannot, no token is better than one only this
-    // side knows.
-    std::fs::write(ext.join("token.txt"), &token).ok()?;
-    Some(token)
-}
-
-/// The unpacked extension directory, when there is one. Overridable with
-/// BOOKMARK_BRIDGE_EXT_DIR; otherwise inferred from the binary's location in a
-/// checkout (`<repo>/mcp/target/release/bookmark-bridge`).
-fn extension_dir() -> Option<std::path::PathBuf> {
-    let dir = match std::env::var("BOOKMARK_BRIDGE_EXT_DIR") {
-        Ok(v) if !v.trim().is_empty() => std::path::PathBuf::from(v),
-        _ => std::env::current_exe().ok()?
-            .ancestors().nth(4)?.join("extension"),
-    };
-    dir.is_dir().then_some(dir)
-}
-
 fn tools() -> Value {
     // The schema mirrors chrome.bookmarks. No invented concepts.
     json!([
@@ -176,6 +113,8 @@ fn tools() -> Value {
        "inputSchema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}},
       {"name":"bookmarks_children","description":"Returns a folder's direct children.",
        "inputSchema":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false}},
+      {"name":"bookmarks_find_duplicates","description":"Lists bookmarks with exactly the same URL, with their IDs, titles and parent folder IDs. Optionally scan only a folder and its descendants. Does not change bookmarks.",
+       "inputSchema":{"type":"object","properties":{"folderId":{"type":"string","minLength":1}},"additionalProperties":false}},
       {"name":"bookmarks_update","description":"Changes a bookmark or folder title or URL. With expect, the item is left alone and reported as a mismatch when its current value differs.",
        "inputSchema":{"type":"object","properties":{"id":{"type":"string"},"title":{"type":"string"},"url":{"type":"string"},"expect":{"type":"object"},"force":{"type":"boolean"}},"required":["id"],"additionalProperties":false}},
       {"name":"bookmarks_move","description":"Moves an item to another folder or position. With expect, the item is left alone when its current value differs.",
@@ -201,9 +140,18 @@ fn tools() -> Value {
 
 async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, String> {
     if name == "bridge_status" {
-        let connected = b.outbox.lock().await.is_some();
         let pending = b.pending.lock().await.len();
-        return Ok(json!({"extensionConnected": connected, "pendingRequests": pending}));
+        let connected = matches!(
+            b.call_with_budget("__bridgey_health", json!({}), Duration::from_secs(2)).await,
+            Ok(Value::Bool(true))
+        );
+        let mut status = json!({
+            "extensionConnected": connected, "pendingRequests": pending, "transport": "native"
+        });
+        if !connected {
+            status["reason"] = json!("extension_not_responding");
+        }
+        return Ok(status);
     }
     if let Some(cmd) = name.strip_prefix("history_") {
         // restore mutates; it is not a read. It needs the same protection as the
@@ -212,7 +160,6 @@ async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, Stri
         // change and the agent tries to undo it.
         if cmd == "restore" {
             let marker = dirty_marker();
-            let _ = std::fs::write(&marker, format!("history_restore {}", compact(args)));
             let out = history(b, cmd, args).await;
             if out.is_ok() {
                 if snapshot_and_mark(b, "after: history_restore").await.is_ok() {
@@ -224,6 +171,17 @@ async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, Stri
         return history(b, cmd, args).await;
     }
     let method = name.strip_prefix("bookmarks_").ok_or("Unknown tool.")?;
+    if method == "find_duplicates" {
+        let args = args.as_object().ok_or("Expected an object with optional folderId.")?;
+        if args.keys().any(|key| key != "folderId") {
+            return Err("Only folderId is accepted.".into());
+        }
+        let folder_id = args.get("folderId").map(|id| {
+            id.as_str().filter(|id| !id.is_empty()).ok_or("folderId must be a non-empty string.")
+        }).transpose()?;
+        let tree = b.call("tree", json!({})).await?;
+        return find_duplicates(&tree, folder_id);
+    }
     // Chrome terminates a service worker whose event handler runs past five
     // minutes, which would leave a batch half applied with its reply lost. Cap
     // the size so that state cannot arise.
@@ -254,7 +212,8 @@ async fn handle_tool(b: &Bridge, name: &str, args: &Value) -> Result<Value, Stri
         // the next drift mistakes the agent's own work for a user change and tries
         // to undo it.
         let marker = dirty_marker();
-        let _ = std::fs::write(&marker, &label);
+        std::fs::write(&marker, &label)
+            .map_err(|e| format!("Could not record the pending change: {e}"))?;
         let out = b.call(method, args.clone()).await;
         if out.is_ok() {
             // Mark the resulting state as agent-head. With several sessions, git log
@@ -283,49 +242,26 @@ fn compact(v: &Value) -> String {
 /// worktree: `git add -A` would otherwise commit the lock file and the dirty
 /// marker into every snapshot, and their appearing and disappearing would make
 /// "nothing changed, so do not commit" never hold.
-fn state_dir() -> std::path::PathBuf {
-    #[cfg(windows)]
-    {
-        let base = std::env::var("LOCALAPPDATA")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .unwrap_or_default();
-        std::path::Path::new(&base).join("bookmark-bridge")
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        std::path::Path::new(&home).join(".local/state/bookmark-bridge")
-    }
-}
-
-/// Where the shared token lives. Separate from the state directory because it
-/// is configuration the user may want to find, not churn.
-fn config_dir() -> Option<std::path::PathBuf> {
-    #[cfg(windows)]
-    {
-        let base = std::env::var("APPDATA")
-            .or_else(|_| std::env::var("USERPROFILE"))
-            .ok()?;
-        Some(std::path::Path::new(&base).join("bookmark-bridge"))
-    }
-    #[cfg(not(windows))]
-    {
-        let home = std::env::var("HOME").ok()?;
-        Some(std::path::Path::new(&home).join(".config/bookmark-bridge"))
-    }
-}
-
-/// Restricts a file to its owner where the platform expresses that as a mode.
-/// On Windows the file inherits the user profile's ACL, which is already
-/// per-user, and there is no mode to set.
-fn owner_only(path: &std::path::Path) {
+fn select_profile(profile: &str) -> Result<(), String> {
+    let base = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("USERPROFILE"))
+            .map(PathBuf::from)
+    } else {
+        std::env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".local/state"))
+    }.filter(|path| path.is_absolute()).ok_or("The user's state directory is unavailable.")?;
+    let dir = base.join("bookmark-bridge").join("native-v2").join(profile);
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, PermissionsExt::from_mode(0o600));
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
     }
-    #[cfg(not(unix))]
-    let _ = path;
+    STATE_DIR.set(dir).map_err(|_| "The profile is already selected.".into())
+}
+
+fn state_dir() -> &'static Path {
+    STATE_DIR.get().expect("profile selected before accepting tool calls")
 }
 
 /// The git worktree. It holds exactly one file: the bookmark tree.
@@ -359,7 +295,7 @@ fn write_agent_head_at() {
 }
 
 fn git(args: &[&str]) -> Result<String, String> {
-    let out = std::process::Command::new("git")
+    let out = std::process::Command::new(registration::git_program())
         .arg("-C").arg(history_dir())
         .args(args)
         .output()
@@ -426,6 +362,9 @@ async fn commit_blocking(tree: Value, label: String, mark: bool) -> Result<(), S
 }
 
 fn write_and_commit(tree: &Value, label: &str) -> Result<(), String> {
+    if !tree.as_array().is_some_and(|roots| !roots.is_empty()) {
+        return Err("Chrome did not return a bookmark tree.".into());
+    }
     let dir = history_dir();
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     if !dir.join(".git").exists() {
@@ -433,20 +372,12 @@ fn write_and_commit(tree: &Value, label: &str) -> Result<(), String> {
         let _ = git(&["config", "user.name", "bookmark-bridge"]);
         let _ = git(&["config", "user.email", "bookmark-bridge@localhost"]);
     }
-    // Earlier versions kept the lock and the marker inside the worktree and
-    // committed them. Stop tracking them so old repositories converge on
-    // snapshots that contain only the tree.
-    for stale in [".bridge.lock", ".agent-head-dirty", "bookmarks.json"] {
-        if dir.join(stale).exists() || git(&["ls-files", "--error-unmatch", stale]).is_ok() {
-            let _ = git(&["rm", "-q", "--cached", "--ignore-unmatch", stale]);
-            let _ = std::fs::remove_file(dir.join(stale));
-        }
-    }
     let pretty = serde_json::to_string_pretty(&tree).map_err(|e| e.to_string())?;
     std::fs::write(dir.join("tree.json"), pretty).map_err(|e| e.to_string())?;
-    git(&["add", "-A"])?;
-    // git fails when there is nothing to commit. That is not an error.
-    let _ = git(&["commit", "-q", "-m", label]);
+    git(&["add", "--", "tree.json"])?;
+    if !git(&["diff", "--cached", "--name-only", "--", "tree.json"])?.is_empty() {
+        git(&["commit", "-q", "-m", label, "--", "tree.json"])?;
+    }
     Ok(())
 }
 
@@ -463,7 +394,7 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
         }
         "restore" => {
             let c = args.get("commit").and_then(|v| v.as_str()).ok_or("commit is required.")?;
-            let raw = git(&["show", &format!("{c}:tree.json")])?;
+            let raw = git(&["show", "--end-of-options", &format!("{c}:tree.json")])?;
             let old: Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
             snapshot(b, &format!("restore to {c}")).await?;
             let now = b.call("tree", json!({})).await?;
@@ -490,6 +421,8 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
                      yourself.",
                     want.len(), overlap));
             }
+            std::fs::write(dirty_marker(), format!("history_restore {}", compact(args)))
+                .map_err(|e| format!("Could not record the pending restore: {e}"))?;
             // A recreated folder gets a new id. Children carrying the old parent id
             // would all fail, so build an old-id -> new-id map as we go and rewrite
             // each parent.
@@ -561,8 +494,12 @@ async fn history(b: &Bridge, cmd: &str, args: &Value) -> Result<Value, String> {
             }
             let ledger = b.call("drift", dargs).await.unwrap_or(Value::Null);
             let Some(base) = base else {
-                return Ok(json!({"baseline": "none",
-                    "note": "No agent baseline exists yet. Your first operation creates one.",
+                return Ok(json!({"baseline": "none", "unreliable": unreliable, "pendingOp": pending,
+                    "note": if unreliable {
+                        "A change may have applied before the first baseline was saved. Review the before-snapshot with history_log."
+                    } else {
+                        "No agent baseline exists yet. Your first operation creates one."
+                    },
                     "ledger": ledger}));
             };
             let old: Value = serde_json::from_str(&base).map_err(|e| e.to_string())?;
@@ -665,47 +602,66 @@ fn flatten(node: &Value, parent: Option<&str>, out: &mut Vec<Row>) {
     }
 }
 
+fn find_duplicates(tree: &Value, folder_id: Option<&str>) -> Result<Value, String> {
+    let roots = tree.as_array().ok_or("The extension did not return a bookmark tree.")?;
+    let subtree = if let Some(id) = folder_id {
+        let mut pending: Vec<_> = roots.iter().collect();
+        loop {
+            let node = pending.pop().ok_or("No bookmark folder with that ID.")?;
+            if node["id"].as_str() == Some(id) && node.get("url").is_none() {
+                break node;
+            }
+            if let Some(children) = node["children"].as_array() {
+                pending.extend(children);
+            }
+        }
+    } else {
+        tree
+    };
+
+    let mut rows = Vec::new();
+    flatten(subtree, None, &mut rows);
+    let mut by_url: BTreeMap<_, Vec<_>> = BTreeMap::new();
+    for row in &rows {
+        if let Some(url) = row.url.as_deref().filter(|url| !url.is_empty()) {
+            by_url.entry(url).or_default().push(row);
+        }
+    }
+    let groups: Vec<_> = by_url.into_iter().filter(|(_, rows)| rows.len() > 1).map(|(url, rows)| {
+        let bookmarks: Vec<_> = rows.iter().map(|row| {
+            json!({"id": row.id, "title": row.title, "parentId": row.parent})
+        }).collect();
+        json!({"url": url, "bookmarks": bookmarks})
+    }).collect();
+    Ok(json!({"groups": groups}))
+}
+
 #[tokio::main]
 async fn main() {
-    let port: u16 = std::env::var("BOOKMARK_BRIDGE_PORT").ok()
-        .and_then(|s| s.parse().ok()).unwrap_or(8787);
-    // The token is generated here and planted in the extension directory, so the
-    // user has nothing to copy. A web page cannot read files, so this stops a
-    // hostile page dialing ws://127.0.0.1. It does not stop a hostile process on
-    // this machine, which can read the file just as easily.
-    let token = std::env::var("BOOKMARK_BRIDGE_TOKEN")
-        .unwrap_or_else(|_| ensure_token().unwrap_or_default());
-
-    let bridge = Arc::new(Bridge {
-        pending: Arc::new(Mutex::new(HashMap::new())),
-        outbox: Arc::new(Mutex::new(None)),
-        epoch: std::sync::atomic::AtomicU64::new(0),
-        next_id: Mutex::new(0),
-        token,
-    });
-
-    // WebSocket listener, bound to loopback only.
-    {
-        let b = bridge.clone();
-        tokio::spawn(async move {
-            // When another MCP process already holds the port, join it and relay.
-            // This is how several client sessions share one browser extension.
-            let listener = match tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-                Ok(l) => l,
-                Err(_) => {
-                    eprintln!("[bridge] port {port} is held by another bridge; joining as a peer");
-                    join_as_peer(b, port).await;
-                    return;
-                }
-            };
-            eprintln!("[bridge] listening on ws://127.0.0.1:{port}");
-            while let Ok((stream, _)) = listener.accept().await {
-                let b = b.clone();
-                tokio::spawn(async move { serve_socket(b, stream).await; });
+    let mut args = std::env::args().skip(1);
+    if let Some(command) = args.next() {
+        let result = if command == "register-native" {
+            match args.next() {
+                Some(id) if args.next().is_none() => registration::register_unpacked(&id),
+                None => registration::register(),
+                _ => Err("Usage: bookmark-bridge register-native [extension-id]".into()),
             }
-        });
+        } else if registration::check_origin(&command) {
+            native::run_host().await
+        } else {
+            Err("Unknown command or unauthorized extension origin.".into())
+        };
+        if let Err(e) = &result {
+            eprintln!("[bridgey] {e}");
+        }
+        // Tokio stdin may still be blocked after the browser drops its port.
+        std::process::exit(i32::from(result.is_err()));
     }
 
+    let registration_error = registration::register().err();
+    if let Some(e) = &registration_error {
+        eprintln!("[bridgey] native host registration failed: {e}");
+    }
     // MCP stdio loop
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
@@ -730,7 +686,7 @@ async fn main() {
                 let p = req.get("params").cloned().unwrap_or(Value::Null);
                 let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let args = p.get("arguments").cloned().unwrap_or(json!({}));
-                match handle_tool(&bridge, &name, &args).await {
+                match native::proxy_tool(&name, args, registration_error.as_deref()).await {
                     Ok(v) => Ok(json!({"content": [{"type": "text",
                         "text": serde_json::to_string_pretty(&v).unwrap_or_default()}]})),
                     Err(e) => Ok(json!({"content": [{"type": "text", "text": e}], "isError": true})),
@@ -746,191 +702,4 @@ async fn main() {
         let _ = stdout.write_all(format!("{resp}\n").as_bytes()).await;
         let _ = stdout.flush().await;
     }
-}
-
-/// Joins an already-running bridge as a peer and forwards this process's requests
-/// to it. Reconnects when dropped; takes over as host if the first one dies.
-/// This is how several client sessions share one browser extension.
-async fn join_as_peer(b: Arc<Bridge>, port: u16) {
-    loop {
-        let url = format!("ws://127.0.0.1:{port}");
-        match tokio_tungstenite::connect_async(&url).await {
-            Ok((ws, _)) => {
-                let (mut write, mut read) = ws.split();
-                let hello = format!("peer:{}", b.token);
-                if write.send(tokio_tungstenite::tungstenite::Message::Text(hello)).await.is_err() {
-                    continue;
-                }
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-                *b.outbox.lock().await = Some(tx);
-                let writer = tokio::spawn(async move {
-                    while let Some(f) = rx.recv().await {
-                        if write.send(tokio_tungstenite::tungstenite::Message::Text(f)).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-                while let Some(Ok(msg)) = read.next().await {
-                    let Ok(text) = msg.to_text() else { continue };
-                    let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
-                    let Some(id) = v.get("id").and_then(|i| i.as_u64()) else { continue };
-                    if let Some(s) = b.pending.lock().await.remove(&id) { let _ = s.send(v); }
-                }
-                writer.abort();
-                *b.outbox.lock().await = None;
-            }
-            Err(_) => {}
-        }
-        // The host may be gone. Try to claim the port and become the host.
-        if let Ok(listener) = tokio::net::TcpListener::bind(("127.0.0.1", port)).await {
-            eprintln!("[bridge] took over as host");
-            while let Ok((stream, _)) = listener.accept().await {
-                let b = b.clone();
-                tokio::spawn(async move { serve_socket(b, stream).await; });
-            }
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-    }
-}
-
-async fn serve_peer(
-    b: Arc<Bridge>,
-    mut read: futures_util::stream::SplitStream<
-        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>,
-    mut write: futures_util::stream::SplitSink<
-        tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
-        tokio_tungstenite::tungstenite::Message>,
-) {
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    let writer = tokio::spawn(async move {
-        while let Some(frame) = out_rx.recv().await {
-            if write.send(tokio_tungstenite::tungstenite::Message::Text(frame)).await.is_err() {
-                break;
-            }
-        }
-    });
-    while let Some(Ok(msg)) = read.next().await {
-        let Ok(text) = msg.to_text() else { continue };
-        let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
-        let Some(id) = v.get("id").and_then(|i| i.as_u64()) else { continue };
-        let method = v.get("method").and_then(|m| m.as_str()).unwrap_or("").to_string();
-        let params = v.get("params").cloned().unwrap_or(json!({}));
-        let b2 = b.clone();
-        let tx = out_tx.clone();
-        tokio::spawn(async move {
-            let reply = match b2.call(&method, params).await {
-                Ok(r) => json!({"id": id, "result": r}),
-                Err(e) => json!({"id": id, "error": e.to_string()}),
-            };
-            let _ = tx.send(reply.to_string());
-        });
-    }
-    writer.abort();
-    eprintln!("[bridge] peer MCP process disconnected");
-}
-
-async fn serve_socket(b: Arc<Bridge>, stream: tokio::net::TcpStream) {
-    // A web page can dial ws://127.0.0.1 too. Browsers always attach an Origin, so
-    // http(s) origins are rejected here. The extension sends chrome-extension://
-    // and a CLI sends no Origin at all.
-    let mut rejected = false;
-    let ws = match tokio_tungstenite::accept_hdr_async(stream, |req: &tokio_tungstenite::tungstenite::handshake::server::Request, res| {
-        if let Some(o) = req.headers().get("origin").and_then(|v| v.to_str().ok()) {
-            if o.starts_with("http://") || o.starts_with("https://") {
-                rejected = true;
-            }
-        }
-        Ok(res)
-    }).await {
-        Ok(w) => w, Err(_) => return,
-    };
-    if rejected {
-        eprintln!("[bridge] rejected a connection from a web origin");
-        return;
-    }
-    let (mut write, mut read) = ws.split();
-
-    // The first frame is "<role>:<token>", where role is ext (the extension) or
-    // peer (another MCP process). An older extension sends only the token, so a
-    // missing role means ext. With no token configured the value is not checked:
-    // binding to loopback is taken as sufficient. Set BOOKMARK_BRIDGE_TOKEN to also
-    // exclude other processes on this machine.
-    let hello = match read.next().await {
-        Some(Ok(msg)) => msg.to_text().unwrap_or("").trim().to_string(),
-        _ => String::new(),
-    };
-    let (role, tok) = match hello.split_once(':') {
-        Some((r, t)) if r == "ext" || r == "peer" => (r.to_string(), t.to_string()),
-        _ => ("ext".to_string(), hello.clone()),
-    };
-    let authed = b.token.is_empty() || tok == b.token;
-    if !authed {
-        let _ = write.send(tokio_tungstenite::tungstenite::Message::Text("unauthorized".into())).await;
-        eprintln!("[bridge] closed a connection: token mismatch");
-        return;
-    }
-    eprintln!("[bridge] extension connected");
-
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
-    // Capture this connection's own sender now. Re-reading the global outbox later
-    // would pick up a sender from a connection that arrived meanwhile and ping the
-    // wrong socket.
-    let ping_tx = tx.clone();
-    if role == "peer" {
-        eprintln!("[bridge] another MCP process attached as a peer");
-        serve_peer(b, read, write).await;
-        return;
-    }
-    let my_epoch = b.epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    *b.outbox.lock().await = Some(tx);
-
-    // Requests sent over the dropped socket are still outstanding. Rather than let
-    // them wait out the budget in silence, say immediately that it is unknown
-    // whether they applied - a retry can be destructive.
-    {
-        let mut pend = b.pending.lock().await;
-        let stranded: Vec<_> = pend.drain().collect();
-        drop(pend);
-        for (_, s) in stranded {
-            let _ = s.send(json!({"error":
-                "The extension reconnected. Whether the previous request applied is \
-                 unknown - check with history_drift before retrying."}));
-        }
-    }
-
-    let writer = tokio::spawn(async move {
-        while let Some(frame) = rx.recv().await {
-            if write.send(tokio_tungstenite::tungstenite::Message::Text(frame)).await.is_err() { break; }
-        }
-    });
-
-    // An MV3 service worker sleeps after roughly 30s idle. WebSocket traffic resets
-    // that timer, so poke it periodically to keep it awake. Without this the
-    // connection drops during every quiet spell.
-    let pinger = tokio::spawn(async move {
-        loop {
-            // The worker dies at 30s idle. Poke every 15s to leave margin.
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
-            if ping_tx.send("ping".to_string()).is_err() { break; }
-        }
-    });
-
-    while let Some(Ok(msg)) = read.next().await {
-        let Ok(text) = msg.to_text() else { continue };
-        if text == "pong" { continue; }
-        let Ok(v) = serde_json::from_str::<Value>(text) else { continue };
-        let Some(id) = v.get("id").and_then(|i| i.as_u64()) else { continue };
-        if let Some(sender) = b.pending.lock().await.remove(&id) { let _ = sender.send(v); }
-    }
-    pinger.abort();
-
-    // Clear only while this generation is still current; a newer connection owns it otherwise.
-    if b.epoch.load(std::sync::atomic::Ordering::SeqCst) == my_epoch {
-        *b.outbox.lock().await = None;
-        eprintln!("[bridge] extension disconnected");
-    } else {
-        eprintln!("[bridge] cleaned up a stale connection (newer one kept)");
-    }
-    writer.abort();
 }
