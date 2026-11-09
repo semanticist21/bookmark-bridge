@@ -1,13 +1,11 @@
 #!/usr/bin/env node
-// Fetches the prebuilt server for this platform on first run, then hands over to
-// it. An MCP client launches this over stdio, so nothing may be written to
+// Verifies and unpacks the bundled server, then hands over to it.
+// An MCP client launches this over stdio, so nothing may be written to
 // stdout that is not protocol: progress goes to stderr.
 import {spawn} from 'node:child_process';
 import {createHash} from 'node:crypto';
-import {createWriteStream} from 'node:fs';
 import {chmod, mkdir, mkdtemp, readFile, rename, rm, stat} from 'node:fs/promises';
 import {dirname, join} from 'node:path';
-import {pipeline} from 'node:stream/promises';
 import {fileURLToPath} from 'node:url';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -35,7 +33,7 @@ if (!target) {
   die(`no prebuilt server for ${key}. Build from source: https://github.com/${REPO}`);
 }
 
-// Cached per version, so upgrading the package fetches a matching server rather
+// Cached per version, so upgrading the package unpacks a matching server rather
 // than silently reusing an old one.
 const cacheDir = join(here, '..', '.bin', pkg.version);
 const binary = join(cacheDir, `bookmark-bridge${EXE}`);
@@ -44,42 +42,20 @@ async function exists(path) {
   try { await stat(path); return true; } catch { return false; }
 }
 
-async function fetchOrDie(url, what) {
-  let res = await fetch(url, {redirect: 'follow', signal: AbortSignal.timeout(30_000)})
-    .catch(() => null);
-  if (!res || res.status >= 500) {
-    res = await fetch(url + '?download=1', {redirect: 'follow', signal: AbortSignal.timeout(30_000)});
-  }
-  if (!res.ok) die(`could not download ${what} (HTTP ${res.status})\n  ${url}`);
-  return res;
-}
-
 async function install() {
-  const tag = `v${pkg.version}`;
+  const assets = join(here, '..', 'release-assets');
   const name = `bookmark-bridge-${target}.tar.gz`;
-  const base = `https://github.com/${REPO}/releases/download/${tag}`;
-
-  process.stderr.write(`bookmark-bridge: fetching ${tag} for ${key}\n`);
-  const sums = (await (await fetchOrDie(`${base}/SHA256SUMS`, 'checksums')).text());
-  const line = sums.split('\n').find((l) => l.trim().endsWith(name));
-  if (!line) die(`no checksum published for ${name} in ${tag}`);
-  const expected = line.trim().split(/\s+/)[0];
+  const sums = await readFile(join(assets, 'SHA256SUMS'), 'utf8');
+  const expected = sums.split('\n').map(line => line.trim().split(/\s+/))
+    .find(([, file]) => file === name)?.[0];
+  if (!expected) throw new Error(`no checksum bundled for ${name}`);
+  const archive = join(assets, name);
+  const actual = createHash('sha256').update(await readFile(archive)).digest('hex');
+  if (actual !== expected) throw new Error(`checksum mismatch for ${name}`);
 
   await mkdir(dirname(cacheDir), {recursive: true});
   const staging = await mkdtemp(join(dirname(cacheDir), '.install-'));
-  const archive = join(staging, name);
   try {
-    await pipeline(
-      (await fetchOrDie(`${base}/${name}`, 'the server')).body,
-      createWriteStream(archive),
-    );
-
-    // Never run a binary that does not match what the release published.
-    const actual = createHash('sha256').update(await readFile(archive)).digest('hex');
-    if (actual !== expected) {
-      die(`checksum mismatch for ${name}\n  expected ${expected}\n  got      ${actual}`);
-    }
-
     await new Promise((resolve, reject) => {
       const tar = spawn('tar', ['-xzf', archive, '-C', staging], {stdio: 'inherit'});
       tar.on('error', reject);

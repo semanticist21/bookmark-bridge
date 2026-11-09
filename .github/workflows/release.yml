@@ -74,6 +74,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -82,15 +85,25 @@ jobs:
         # Computed here rather than per-runner, so one tool produces them all and
         # the npm launcher has a single format to parse.
         run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
+      - name: Pack the Native npm distribution
+        if: startsWith(inputs.tag || github.ref_name, 'v2.')
+        run: |
+          test "$(ls artifacts/*.tar.gz | wc -l)" -eq 5
+          mkdir -p npm/release-assets
+          cp artifacts/*.tar.gz artifacts/SHA256SUMS npm/release-assets/
+          cd npm
+          npm pack --pack-destination ../artifacts
       - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           release_flags=()
+          assets=(artifacts/*.tar.gz artifacts/SHA256SUMS)
           if [[ "$RELEASE_TAG" == v2.* ]]; then
             release_flags=(--prerelease --latest=false)
+            assets+=(artifacts/*.tgz)
           fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_TAG" --generate-notes --verify-tag "${release_flags[@]}" \
-            artifacts/*.tar.gz artifacts/SHA256SUMS
+            "${assets[@]}"

@@ -129,6 +129,7 @@ The v2 server is available on the npm `native` channel. The standard
    permission prompt. If setup fails, the extension stays in Legacy mode.
 3. Run `bridge_status` from your MCP client to confirm the connection.
 
+The Native npm package contains the prebuilt servers and their checksums.
 The first server startup installs the native host in a user data directory
 outside the npm cache and registers it with Chrome. Chrome launches that host
 when the extension connects. The host and the MCP process communicate over an
