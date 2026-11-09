@@ -45,7 +45,11 @@ async function exists(path) {
 }
 
 async function fetchOrDie(url, what) {
-  const res = await fetch(url, {redirect: 'follow'});
+  let res = await fetch(url, {redirect: 'follow', signal: AbortSignal.timeout(30_000)})
+    .catch(() => null);
+  if (!res || res.status >= 500) {
+    res = await fetch(url + '?download=1', {redirect: 'follow', signal: AbortSignal.timeout(30_000)});
+  }
   if (!res.ok) die(`could not download ${what} (HTTP ${res.status})\n  ${url}`);
   return res;
 }
