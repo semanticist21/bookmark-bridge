@@ -1,5 +1,6 @@
 const $ = (id) => document.getElementById(id);
 const NATIVE_PERMISSION = {permissions: ['nativeMessaging']};
+const STORE_ID = 'ekokljgbbianihlpahackkfdendobngd';
 const REASONS = {
   legacy_unreachable: 'Start the Legacy MCP server and check that its port matches this popup.',
   legacy_timeout: 'The Legacy connection timed out. Check the port and reconnect.',
@@ -113,6 +114,22 @@ async function changeMode(mode) {
     }
   });
   $('reload').addEventListener('click', () => chrome.runtime.reload());
+  if (chrome.runtime.id !== STORE_ID) {
+    $('unpacked').hidden = false;
+    setText('unpackedCommand', 'npx -y bookmark-bridge@native register-native ' + chrome.runtime.id);
+  }
+  for (const button of document.querySelectorAll('[data-guide]')) {
+    button.addEventListener('click', () => $('guide').showModal());
+  }
+  $('guideClose').addEventListener('click', () => $('guide').close());
+  for (const button of document.querySelectorAll('.copy button')) {
+    button.addEventListener('click', async () => {
+      const copied = await navigator.clipboard.writeText(button.parentElement.querySelector('code').textContent)
+        .then(() => true, () => false);
+      button.textContent = copied ? 'Copied' : 'Select and copy';
+      setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+    });
+  }
   $('port').addEventListener('change', () => {
     const port = $('port').valueAsNumber;
     if ($('port').reportValidity()) chrome.storage.local.set({port: Number.isNaN(port) ? 8787 : port});

@@ -22,7 +22,7 @@ input[type=number],select{width:100%;padding:6px 9px;
  border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);
  font:inherit;font-size:13px;font-variant-numeric:tabular-nums}
 input[type=number]{max-width:92px}
-input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--ok);outline-offset:1px}
+input:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--ok);outline-offset:1px}
 [hidden]{display:none!important}
 .switch{appearance:none;width:36px;height:21px;border-radius:11px;background:var(--off);
  border:0;position:relative;cursor:pointer;transition:background .15s;flex:none}
@@ -48,3 +48,32 @@ body:not([data-ready]) .switch,body:not([data-ready]) .switch::after{transition:
  color:var(--fg);user-select:all;overflow-wrap:anywhere}
 .hint a{color:var(--muted)}
 .hint a:hover{color:var(--fg)}
+
+.link{font:inherit;padding:0;border:0;background:none;color:var(--muted);text-decoration:underline;cursor:pointer}
+.link:hover{color:var(--fg)}
+.setup{display:block;margin:14px auto 0;font-size:12px}
+/* The popup sizes itself to the page, so make room while the guide is open. */
+body:has(#guide[open]) main{width:360px;height:520px}
+dialog{width:calc(100% - 20px);max-height:calc(100% - 20px);padding:0 16px 16px;
+ border:1px solid var(--line);border-radius:10px;background:var(--bg);color:var(--fg);font-size:12.5px}
+dialog::backdrop{background:rgb(0 0 0 / .35)}
+dialog header{position:sticky;top:0;display:flex;align-items:center;justify-content:space-between;
+ padding-top:10px;background:var(--bg)}
+dialog h2{font-size:15px;margin:0}
+dialog h3{font-size:13px;margin:16px 0 6px}
+dialog p{margin:6px 0}
+dialog a{color:var(--muted)}
+.close{font-size:20px;line-height:1;padding:2px 6px;border:0;background:none;color:var(--muted);cursor:pointer}
+.close:hover{color:var(--fg)}
+.label{color:var(--muted);font-size:11.5px;margin:10px 0 4px}
+.note{color:var(--muted);font-size:11.5px}
+.copy{position:relative;border:1px solid var(--line);border-radius:6px}
+.copy pre{margin:0}
+.copy code{display:block;padding:7px 52px 7px 8px;white-space:pre-wrap;overflow-wrap:anywhere;user-select:all}
+code{font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
+.copy button{position:absolute;top:4px;right:4px;font:inherit;font-size:11px;padding:2px 7px;
+ border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--fg);cursor:pointer}
+.copy button:hover{border-color:var(--muted)}
+code.inline{padding:0 3px;border:1px solid var(--line);border-radius:4px}
+details{margin-top:14px}
+summary{cursor:pointer;color:var(--muted)}

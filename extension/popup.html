@@ -25,8 +25,7 @@
   <p class="hint" id="hint" hidden>
     <span id="hintText" role="status"></span>
     <code id="setupCommand" hidden></code>
-    <a id="help" href="https://github.com/semanticist21/bookmark-bridge#install"
-       target="_blank" rel="noreferrer">Setup guide</a>
+    <button type="button" class="link" data-guide>Setup guide</button>
   </p>
 
   <div class="row">
@@ -35,5 +34,50 @@
     <button id="reconnect">Reconnect</button>
     <button id="reload" title="Restart the extension">Reload</button>
   </div>
+  <button type="button" class="link setup" data-guide>How to set up</button>
 </main>
+
+<dialog id="guide" aria-labelledby="guideTitle">
+  <header>
+    <h2 id="guideTitle">Set up Bridgey</h2>
+    <button type="button" class="close" id="guideClose" aria-label="Close">×</button>
+  </header>
+  <p>Bridgey needs a small MCP server on this computer. Your MCP client starts it for you.</p>
+
+  <h3>1. Add the MCP server</h3>
+  <p class="label">Claude Code</p>
+  <div class="copy"><code>claude mcp add bookmark-bridge -- npx -y bookmark-bridge@native</code><button type="button">Copy</button></div>
+  <p class="label">Codex — <code class="inline">~/.codex/config.toml</code></p>
+  <div class="copy"><pre><code>[mcp_servers.bookmark-bridge]
+command = "npx"
+args = ["-y", "bookmark-bridge@native"]</code></pre><button type="button">Copy</button></div>
+  <p class="label">Other clients</p>
+  <div class="copy"><pre><code>{
+  "mcpServers": {
+    "bookmark-bridge": {
+      "command": "npx",
+      "args": ["-y", "bookmark-bridge@native"]
+    }
+  }
+}</code></pre><button type="button">Copy</button></div>
+  <p class="note">Requires Node.js and <code class="inline">git</code> on your PATH.</p>
+
+  <h3>2. Restart the MCP client</h3>
+  <p>On its first start, the server registers itself with Chrome.</p>
+
+  <div id="unpacked" hidden>
+    <p class="note">This is an unpacked copy of Bridgey, so register its ID too:</p>
+    <div class="copy"><code id="unpackedCommand"></code><button type="button">Copy</button></div>
+  </div>
+
+  <h3>3. Choose Native Messaging</h3>
+  <p>Set <b>Mode</b> to Native Messaging in this popup and allow the permission Chrome asks for. Then ask your client to run <code class="inline">bridge_status</code>.</p>
+
+  <details>
+    <summary>Use Legacy (WebSocket) instead</summary>
+    <p>Register <code class="inline">npx -y bookmark-bridge</code> without <code class="inline">@native</code>, and keep Mode on Legacy. The port must match the server (8787 by default).</p>
+  </details>
+
+  <p class="note"><a href="https://github.com/semanticist21/bookmark-bridge#install" target="_blank" rel="noreferrer">Full guide on GitHub</a></p>
+</dialog>
 <script src="popup.js"></script>
