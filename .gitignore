@@ -1,8 +1,3 @@
-# This machine's bridge token. Never commit.
-extension/token.txt
-# Local port/preference overrides.
-extension/config.local.json
-
 # Rust build output.
 mcp/target/
 

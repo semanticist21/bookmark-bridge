@@ -11,26 +11,17 @@
   </ul>
 
   <dl class="fields">
-    <dt><label for="mode">Mode</label></dt>
-    <dd><select id="mode" disabled>
-      <option value="legacy">Legacy (WebSocket)</option>
-      <option value="native">Native Messaging</option>
-    </select></dd>
-    <dt id="portLabel"><label for="port">Port</label></dt>
-    <dd id="portField"><input id="port" type="number" min="1" max="65535" inputmode="numeric"></dd>
     <dt><label for="enabled">Enabled</label></dt>
     <dd><input id="enabled" type="checkbox" class="switch" role="switch"></dd>
   </dl>
 
   <p class="hint" id="hint" hidden>
     <span id="hintText" role="status"></span>
-    <code id="setupCommand" hidden></code>
+    <code id="setupCommand" hidden>npx -y bookmark-bridge</code>
     <button type="button" class="link" data-guide>Setup guide</button>
   </p>
 
   <div class="row">
-    <!-- Reconnect redials the socket. Reload restarts the whole extension,
-         which is only needed when its code changed or the worker is wedged. -->
     <button id="reconnect">Reconnect</button>
     <button id="reload" title="Restart the extension">Reload</button>
   </div>
@@ -46,17 +37,17 @@
 
   <h3>1. Add the MCP server</h3>
   <p class="label">Claude Code</p>
-  <div class="copy"><code>claude mcp add bookmark-bridge -- npx -y bookmark-bridge@native</code><button type="button">Copy</button></div>
+  <div class="copy"><code>claude mcp add bookmark-bridge -- npx -y bookmark-bridge</code><button type="button">Copy</button></div>
   <p class="label">Codex — <code class="inline">~/.codex/config.toml</code></p>
   <div class="copy"><pre><code>[mcp_servers.bookmark-bridge]
 command = "npx"
-args = ["-y", "bookmark-bridge@native"]</code></pre><button type="button">Copy</button></div>
+args = ["-y", "bookmark-bridge"]</code></pre><button type="button">Copy</button></div>
   <p class="label">Other clients</p>
   <div class="copy"><pre><code>{
   "mcpServers": {
     "bookmark-bridge": {
       "command": "npx",
-      "args": ["-y", "bookmark-bridge@native"]
+      "args": ["-y", "bookmark-bridge"]
     }
   }
 }</code></pre><button type="button">Copy</button></div>
@@ -70,13 +61,8 @@ args = ["-y", "bookmark-bridge@native"]</code></pre><button type="button">Copy</
     <div class="copy"><code id="unpackedCommand"></code><button type="button">Copy</button></div>
   </div>
 
-  <h3>3. Choose Native Messaging</h3>
-  <p>Set <b>Mode</b> to Native Messaging in this popup and allow the permission Chrome asks for. Then ask your client to run <code class="inline">bridge_status</code>.</p>
-
-  <details>
-    <summary>Use Legacy (WebSocket) instead</summary>
-    <p>Register <code class="inline">npx -y bookmark-bridge</code> without <code class="inline">@native</code>, and keep Mode on Legacy. The port must match the server (8787 by default).</p>
-  </details>
+  <h3>3. Connect Bridgey</h3>
+  <p>Click <b>Reconnect</b>. When Bridge shows <b>Connected</b>, ask your MCP client to run <code class="inline">bridge_status</code>.</p>
 
   <p class="note"><a href="https://github.com/semanticist21/bookmark-bridge#install" target="_blank" rel="noreferrer">Full guide on GitHub</a></p>
 </dialog>

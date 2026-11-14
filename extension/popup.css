@@ -18,11 +18,7 @@ h1{font-size:15px;font-weight:650;margin:0 0 10px;letter-spacing:-.01em}
 .fields{display:grid;grid-template-columns:auto 1fr;align-items:center;gap:12px 14px;margin:0}
 dt{color:var(--muted);font-size:13px}
 dd{margin:0;display:flex;align-items:center;gap:10px}
-input[type=number],select{width:100%;padding:6px 9px;
- border:1px solid var(--line);border-radius:7px;background:var(--bg);color:var(--fg);
- font:inherit;font-size:13px;font-variant-numeric:tabular-nums}
-input[type=number]{max-width:92px}
-input:focus-visible,select:focus-visible,button:focus-visible,summary:focus-visible,a:focus-visible{outline:2px solid var(--ok);outline-offset:1px}
+input:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid var(--ok);outline-offset:1px}
 [hidden]{display:none!important}
 .switch{appearance:none;width:36px;height:21px;border-radius:11px;background:var(--off);
  border:0;position:relative;cursor:pointer;transition:background .15s;flex:none}
@@ -75,5 +71,3 @@ code{font:11px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace}
  border:1px solid var(--line);border-radius:5px;background:var(--bg);color:var(--fg);cursor:pointer}
 .copy button:hover{border-color:var(--muted)}
 code.inline{padding:0 3px;border:1px solid var(--line);border-radius:4px}
-details{margin-top:14px}
-summary{cursor:pointer;color:var(--muted)}

@@ -36,7 +36,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.ref }}
-      - name: Check release version and channel
+      - name: Check release version
         shell: bash
         env:
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
@@ -46,9 +46,6 @@ jobs:
           rust_version=$(cargo metadata --manifest-path mcp/Cargo.toml --locked --no-deps --format-version 1 | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8")).packages[0].version')
           test "$RELEASE_TAG" = "v$npm_version"
           test "$rust_version" = "$npm_version"
-          if [[ "$RELEASE_TAG" == v2.* ]]; then
-            test "$(node -p 'require("./npm/package.json").publishConfig.tag')" = native
-          fi
       - name: Add target
         run: rustup target add ${{ matrix.target }}
       - name: Build
@@ -85,12 +82,12 @@ jobs:
         # Computed here rather than per-runner, so one tool produces them all and
         # the npm launcher has a single format to parse.
         run: cd artifacts && sha256sum *.tar.gz > SHA256SUMS && cat SHA256SUMS
-      - name: Pack the Native npm distribution
-        if: startsWith(inputs.tag || github.ref_name, 'v2.')
+      - name: Pack the npm distribution
         run: |
           test "$(ls artifacts/*.tar.gz | wc -l)" -eq 5
           mkdir -p npm/release-assets
           cp artifacts/*.tar.gz artifacts/SHA256SUMS npm/release-assets/
+          cp README.md npm/README.md
           cd npm
           npm pack --pack-destination ../artifacts
       - name: Publish
@@ -98,12 +95,6 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          release_flags=()
-          assets=(artifacts/*.tar.gz artifacts/SHA256SUMS)
-          if [[ "$RELEASE_TAG" == v2.* ]]; then
-            release_flags=(--prerelease --latest=false)
-            assets+=(artifacts/*.tgz)
-          fi
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASE_TAG" --generate-notes --verify-tag "${release_flags[@]}" \
-            "${assets[@]}"
+            --title "$RELEASE_TAG" --generate-notes --verify-tag --latest \
+            artifacts/*.tar.gz artifacts/SHA256SUMS artifacts/*.tgz

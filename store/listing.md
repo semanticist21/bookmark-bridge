@@ -31,8 +31,7 @@ Lets a local MCP client read and tidy your Chrome bookmarks. All communication s
 **상세 설명**
 ```
 An MCP client running on your computer can read and reorganize your Chrome
-bookmarks through this extension. Choose between the existing local WebSocket
-connection and Chrome Native Messaging. Both keep your bookmark data on your
+bookmarks through Chrome Native Messaging. Bridgey keeps bookmark data on your
 computer.
 
 Ask your client to find the bookmarks you half remember, strip the site names
@@ -76,29 +75,22 @@ no function at all.
 
 **`storage`**
 ```
-Stores the selected connection mode, local settings and a random ID that keeps
-Native Messaging history separate for each browser profile. Also keeps a capped
+Stores local settings and a random ID that keeps bookmark history separate
+for each browser profile. Also keeps a capped
 local record of recent bookmark events so the MCP client can identify user edits
 before making changes. All of this stays on the user's computer.
 ```
 
-**optional `nativeMessaging`**
+**`nativeMessaging`**
 ```
-Requested only when the user chooses Native Messaging in Bridgey's popup. It
-connects the extension to the registered Bridgey host installed by the local
-MCP server. It exchanges bookmark requests and results with that host.
-```
-
-**host permission `ws://127.0.0.1/*`**
-```
-Used in Legacy mode to connect the extension to the local MCP server over the
-user's own loopback address. The server rejects connections from web pages.
+Connects Bridgey to the registered local host installed by the MCP server.
+The extension exchanges bookmark requests and results with that host.
 ```
 
 **원격 코드 사용**: 아니요
 ```
 All JavaScript ships in the package. It loads no external scripts and does not
-use eval. Both local transports carry JSON data handled by a fixed set of
+use eval. The native host exchanges JSON data handled by a fixed set of
 bookmark operations.
 ```
 

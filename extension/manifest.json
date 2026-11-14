@@ -1,13 +1,11 @@
 {
   "manifest_version": 3,
   "name": "Bridgey \u2014 Bookmark MCP",
-  "version": "2.1.0",
-  "description": "Lets an MCP client read and tidy your bookmarks. Connects only to 127.0.0.1 and never leaves your machine.",
+  "version": "3.0.0",
+  "description": "Lets a local MCP client read and tidy your Chrome bookmarks through Native Messaging.",
   "permissions": [
     "bookmarks",
-    "storage"
-  ],
-  "optional_permissions": [
+    "storage",
     "nativeMessaging"
   ],
   "background": {
@@ -21,8 +19,5 @@
     "16": "icon16.png",
     "48": "icon48.png",
     "128": "icon128.png"
-  },
-  "host_permissions": [
-    "ws://127.0.0.1/*"
-  ]
+  }
 }

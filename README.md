@@ -3,171 +3,67 @@
 An MCP client can read and reorganize your Chrome bookmarks through this.
 Every change lands in git first, so anything can be rolled back.
 
-```
-MCP client --stdio--> bookmark-bridge --ws(127.0.0.1)-- Chrome extension --chrome.bookmarks--> Chrome
-```
-
-The extension dials out rather than listening, because an extension cannot open
-a port. A second MCP process that finds the port taken joins the first as a peer
-and relays through it, so several sessions share one browser.
+Chrome starts the Bridgey host through Native Messaging. An MCP client runs
+the server over stdio, and the server talks to the host over an authenticated
+loopback connection.
 
 ## Install
 
-The default package uses the existing WebSocket connection. For the opt-in
-Native Messaging release, see [Native Messaging](#native-messaging).
+1. Install [Bridgey from the Chrome Web Store](https://chromewebstore.google.com/detail/ekokljgbbianihlpahackkfdendobngd).
+2. Add the server to your MCP client. You need Node.js 18 or later and Git on
+   the client's PATH. The npm package includes verified binaries for macOS,
+   Linux and Windows.
 
-**1. Register the server with your MCP client.** It downloads itself on first
-run, so you do not need Rust. macOS, Linux and Windows.
+   **Claude Code**
+   ```sh
+   claude mcp add bookmark-bridge -- npx -y bookmark-bridge
+   ```
 
-<details open>
-<summary><b>Claude Code</b></summary>
+   **Codex** (~/.codex/config.toml)
+   ```toml
+   [mcp_servers.bookmark-bridge]
+   command = "npx"
+   args = ["-y", "bookmark-bridge"]
+   ```
 
-```sh
-claude mcp add bookmark-bridge -- npx -y bookmark-bridge
-```
+   **Other MCP clients**
+   ```json
+   {
+     "mcpServers": {
+       "bookmark-bridge": {
+         "command": "npx",
+         "args": ["-y", "bookmark-bridge"]
+       }
+     }
+   }
+   ```
+3. Restart your MCP client so the server can register the host with Chrome.
+   Open the Bridgey popup and click **Reconnect**. When it shows
+   **Bridge Connected**, call `bridge_status` from your MCP client.
 
-</details>
-
-<details>
-<summary><b>Codex</b> — <code>~/.codex/config.toml</code></summary>
-
-```toml
-[mcp_servers.bookmark-bridge]
-command = "npx"
-args = ["-y", "bookmark-bridge"]
-```
-
-</details>
-
-<details>
-<summary><b>Any other client</b> — the standard entry</summary>
-
-```json
-{
-  "mcpServers": {
-    "bookmark-bridge": {
-      "command": "npx",
-      "args": ["-y", "bookmark-bridge"]
-    }
-  }
-}
-```
-
-Put it wherever your client keeps its MCP servers.
-
-</details>
-
-<details>
-<summary><b>Or have your agent do it</b> — paste this</summary>
-
-```
-Install the bookmark-bridge MCP server for me.
-
-1. Register it with this client as an MCP server named "bookmark-bridge",
-   running: npx -y bookmark-bridge
-   Use whatever config file this client uses, and do not disturb the servers
-   already there.
-2. Restart or reload so the server is picked up, then call its bridge_status
-   tool and tell me what it reports.
-3. If it says the extension is not connected, tell me to install the Chrome
-   extension from https://github.com/semanticist21/bookmark-bridge and then
-   check again.
-
-Do not build from source; the npx package fetches a prebuilt binary.
-```
-
-</details>
-
-Your client starts and stops it for you. Nothing to leave running. `git` must be
-on PATH — the snapshots are a real git repository.
-
-**2. Install the extension.** Get [Bridgey from the Chrome Web Store](https://chromewebstore.google.com/detail/ekokljgbbianihlpahackkfdendobngd)
-and leave its mode set to **Legacy (WebSocket)**. For the unpacked legacy
-extension, use `extension/` from the `v0.1.2` tag.
-
-That is all of it. The extension's popup goes green once the two find each other.
-
-The extension sleeps when you are not using it. Chrome ends an idle service
-worker, and this one is not woken on a timer — tidying bookmarks is occasional
-work, and polling a socket nobody is using is what Manifest V3 set out to stop.
-It wakes on its own when the browser starts, when a setting changes, when you
-touch a bookmark, and when you open its popup. If an agent reports that the
-extension is not connected, clicking the toolbar icon reconnects it.
-
-<details>
-<summary>Build the legacy server from source</summary>
-
-Use the `v0.1.2` tag for the legacy server.
-
-```sh
-cd mcp && cargo build --release
-```
-
-Then point the same config entry at the binary instead:
-`"command": "<repo>/mcp/target/release/bookmark-bridge"`, with no `args`.
-
-A source checkout also gets a shared token automatically: the server writes one
-to `~/.config/bookmark-bridge/token` and copies it into `extension/`, so both
-ends have it. A Web Store install is read-only and cannot receive one, so the
-server runs without a token there and relies on the loopback binding — a token
-only one side knows would reject the extension forever. Set
-`BOOKMARK_BRIDGE_TOKEN` to demand one regardless, and put the same value in the
-extension's storage. `BOOKMARK_BRIDGE_PORT` changes the port.
-
-</details>
-
-## Native Messaging
-
-The v2 server is available on the npm `native` channel. The standard
-`bookmark-bridge` command still installs the legacy server.
-
-1. Open `chrome://extensions` and check the Bridgey extension version. Native
-   Messaging requires **2.0.0 or later**. If you have an older version, keep
-   using the legacy MCP command or [load the unpacked extension](#unpacked-development-extension)
-   before changing your MCP configuration.
-2. In your MCP client, change the command arguments from `-y bookmark-bridge`
-   to `-y bookmark-bridge@native`, then restart its MCP connection. With Claude
-   Code, the command for a new entry is
-   `claude mcp add bookmark-bridge -- npx -y bookmark-bridge@native`.
-3. Open Bridgey's popup and choose **Native Messaging**. Approve Chrome's
-   permission prompt. If setup fails, the extension stays in Legacy mode.
-   Restore the legacy MCP command to reconnect.
-4. Run `bridge_status` from your MCP client to confirm the connection.
-
-The Native npm package contains the prebuilt servers and their checksums.
-The first server startup installs the native host in a user data directory
-outside the npm cache and registers it with Chrome. Chrome launches that host
-when the extension connects. The host and the MCP process communicate over an
-authenticated loopback connection. Keep `git` on the MCP client's PATH. The
-server remembers its absolute path so the Chrome-launched host can use it.
-
-Bridgey serves one Native Messaging browser profile at a time. Each profile's
-v2 snapshots live under `native-v2/<profileId>` inside the existing history
-state directory. Legacy snapshots remain available in Legacy mode.
-
-To switch back, choose **Legacy (WebSocket)** if the popup shows a mode
-selector, restore the MCP command arguments to `-y bookmark-bridge`, and
-restart its MCP connection.
-Restarting Chrome or reconnecting the popup refreshes the browser connection.
-Restart the MCP connection after updating the server to refresh its tool list.
+The first server startup installs the native host outside the npm cache and
+registers it with Chrome. Bridgey connects one Chrome profile at a time. If
+another profile is connected, turn Bridgey off in that profile first.
 
 ### Unpacked development extension
 
-At `chrome://extensions`, enable Developer mode and load the `extension/`
-directory from this repository at `v2.0.0` or later. Copy the unpacked
-extension's ID and run `npx -y bookmark-bridge@native register-native <extension-id>`
-before selecting Native Messaging. The host remembers this ID alongside the
-published one.
-On macOS and Linux, set `BOOKMARK_BRIDGE_CHROME_USER_DATA_DIR` to the absolute
-user data directory when registering for a Chrome test profile outside the
-default location.
+In `chrome://extensions`, enable Developer mode and load the `extension/`
+directory. Copy the extension ID and run
+`npx -y bookmark-bridge register-native <extension-id>` before reconnecting.
+For a non-default Chrome user data directory on macOS and Linux, set
+`BOOKMARK_BRIDGE_CHROME_USER_DATA_DIR` to its absolute path when registering.
+
+To run from source, build with `cargo build --release --locked --manifest-path mcp/Cargo.toml`
+and point the MCP client at the resulting binary. The binary accepts the same
+`register-native` command.
 
 ## Safety model
 
 Three mechanisms, in the order they engage.
 
-**Snapshots.** Every mutating call commits the whole tree to a git repository at
-`~/.local/state/bookmark-bridge/history`, before and after. A failed
+**Snapshots.** Every mutating call commits the whole tree to a git repository under
+`bookmark-bridge/native-v2/<profileId>/history` in the user state directory,
+before and after. A failed
 before-snapshot refuses the change: a mutation nobody can undo is not worth
 making. `force: true` overrides that.
 
@@ -223,10 +119,9 @@ does not read your real Chrome bookmarks.
 
 ## Privacy
 
-The extension holds `bookmarks` and `storage`. Native Messaging also requires
-an optional permission and uses Chrome's extension allowlist. Legacy mode uses
-`127.0.0.1` and rejects handshakes carrying a web origin. Both transports keep
-bookmark data on this computer.
+The extension uses Chrome's `bookmarks`, `storage` and `nativeMessaging`
+permissions. Chrome restricts access to the host by extension ID. Bridgey
+keeps bookmark data on this computer.
 
 ## License
 

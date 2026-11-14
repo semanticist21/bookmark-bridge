@@ -1,14 +1,10 @@
-// Each Chrome profile has one active transport. Legacy is the default for
-// existing installs and the user must explicitly switch to Native Messaging.
 let connection = null;
 let generation = 0;
 let connecting = false;
 let retryTimer;
 let backoff = 1000;
-let migration = null;
-const state = {mode: 'legacy', phase: 'connecting', reason: '', connectedSince: 0, lastPing: 0};
+const state = {phase: 'connecting', reason: ''};
 const NATIVE_HOST = 'com.kobbokkom.bridgey';
-const NATIVE_PERMISSION = {permissions: ['nativeMessaging']};
 const NATIVE_TIMEOUT = 6000;
 const CHUNK_BYTES = 128 * 1024;
 const MAX_REQUEST_BYTES = 64 * 1024 * 1024;
@@ -159,23 +155,6 @@ async function guard(p) {
 const pick = (o, keys) => Object.fromEntries(
   keys.filter((k) => o[k] !== undefined).map((k) => [k, o[k]]));
 
-// The extension directory owns the Legacy defaults; the popup owns overrides.
-async function legacySettings(saved) {
-  let port = 8787;
-  try {
-    const cfg = await (await fetch(chrome.runtime.getURL('config.json'))).json();
-    if (cfg.port) port = cfg.port;
-  } catch {}
-  let token = '';
-  try {
-    token = (await (await fetch(chrome.runtime.getURL('token.txt'))).text()).trim();
-  } catch { /* No token file means the server runs without one too. */ }
-  return {port: saved.port || port, token: saved.token || token};
-}
-
-const readSettings = () => chrome.storage.local.get(['port', 'enabled', 'token', 'connectionMode', 'nativeProfileId']);
-const savedMode = (saved) => saved.connectionMode === 'native' ? 'native' : 'legacy';
-
 let profileReady;
 function profileId(saved) {
   if (/^[a-f0-9]{32}$/.test(saved.nativeProfileId)) return saved.nativeProfileId;
@@ -190,14 +169,7 @@ function profileId(saved) {
 }
 
 function setStatus(phase, reason = '') {
-  if (phase === 'connected' && state.phase !== 'connected') {
-    state.connectedSince = Date.now();
-    backoff = 1000;
-  }
-  if (phase !== 'connected') {
-    state.connectedSince = 0;
-    state.lastPing = 0;
-  }
+  if (phase === 'connected') backoff = 1000;
   Object.assign(state, {phase, reason});
   const badge = phase === 'connected' ? '' : reason ? '!' : '·';
   chrome.action.setBadgeText({text: badge}).catch(() => {});
@@ -215,7 +187,7 @@ function stopConnection() {
 }
 
 function retry() {
-  if (retryTimer || migration || (state.mode === 'native' && agentDepth)) return;
+  if (retryTimer || agentDepth) return;
   retryTimer = setTimeout(() => {
     retryTimer = undefined;
     connect();
@@ -226,52 +198,35 @@ function retry() {
 function disconnected(transport, reason) {
   if (connection !== transport) return;
   connection = null;
-  transport.close();
+  transport.close(reason);
   setStatus('disconnected', reason);
   retry();
 }
 
 async function connect() {
-  if (connecting || connection || migration) return;
+  if (connecting || connection || agentDepth) return;
   const attempt = generation;
   connecting = true;
   try {
-    const saved = await readSettings();
+    const saved = await chrome.storage.local.get(['enabled', 'nativeProfileId']);
     if (attempt !== generation) return;
-    state.mode = savedMode(saved);
     if (saved.enabled === false) { setStatus('off'); return; }
 
     setStatus('connecting', state.reason);
-    if (state.mode === 'legacy') {
-      const settings = await legacySettings(saved);
-      if (attempt === generation) openLegacy(settings);
-    } else {
-      // A disconnected host can leave a Chrome operation running. Let its
-      // handler finish before a replacement host can take a new snapshot.
-      if (agentDepth) return;
-      if (!(await chrome.permissions.contains(NATIVE_PERMISSION))) {
-        if (attempt === generation) setStatus('disconnected', 'permission_required');
-        return;
-      }
-      if (attempt !== generation) return;
-      const id = await profileId(saved);
-      if (attempt !== generation) return;
-      const transport = openNative(id);
-      connection = transport;
-      try {
-        await transport.prepare();
-        await transport.activate();
-        if (connection === transport) {
-          transport.accept();
-          setStatus('connected');
-        }
-      } catch (error) {
-        disconnected(transport, error.message);
-      }
+    const id = await profileId(saved);
+    if (attempt !== generation) return;
+    const transport = openNative(id);
+    connection = transport;
+    try {
+      await transport.prepare();
+      await transport.activate();
+      if (connection === transport) setStatus('connected');
+    } catch (error) {
+      disconnected(transport, error.message);
     }
   } catch {
     if (attempt === generation) {
-      setStatus('disconnected', state.mode === 'native' ? 'host_unavailable' : 'legacy_unreachable');
+      setStatus('disconnected', 'host_unavailable');
       retry();
     }
   } finally {
@@ -282,51 +237,8 @@ async function connect() {
 function restart() {
   stopConnection();
   backoff = 1000;
-  if (migration) {
-    migration.cancelled = true;
-    migration.candidate?.close();
-  } else {
-    connect();
-  }
-}
-
-function openLegacy({port, token}) {
-  const ws = new WebSocket('ws://127.0.0.1:' + port);
-  let keepalive;
-  const timeout = setTimeout(() => disconnected(transport, 'legacy_timeout'), 6000);
-  const transport = {
-    close() {
-      clearTimeout(timeout);
-      clearInterval(keepalive);
-      ws.close();
-    }
-  };
-  const send = (value) => {
-    if (connection !== transport || ws.readyState !== WebSocket.OPEN) return;
-    try { ws.send(typeof value === 'string' ? value : JSON.stringify(value)); } catch {}
-  };
-  connection = transport;
-  ws.onopen = () => {
-    if (connection !== transport) return;
-    clearTimeout(timeout);
-    send('ext:' + token);
-    setStatus('connected');
-    keepalive = setInterval(() => send('ka'), 20000);
-  };
-  ws.onclose = () => disconnected(transport, 'legacy_unreachable');
-  ws.onmessage = ({data}) => {
-    if (connection !== transport) return;
-    if (data === 'unauthorized') {
-      disconnected(transport, 'token_mismatch');
-    } else if (data === 'ping') {
-      state.lastPing = Date.now();
-      send('pong');
-    } else {
-      let request;
-      try { request = JSON.parse(data); } catch { return; }
-      dispatch(request, send);
-    }
-  };
+  setStatus('connecting');
+  connect();
 }
 
 const validId = (id) => Number.isSafeInteger(id) && id >= 0;
@@ -349,7 +261,7 @@ async function dispatch(request, send) {
   } finally {
     agentDepth--;
     agentUntil = Math.max(agentUntil, Date.now() + 3000);
-    if (!agentDepth && !connection && state.mode === 'native' && state.phase !== 'off') retry();
+    if (!agentDepth && !connection && state.phase !== 'off') retry();
   }
 }
 
@@ -358,8 +270,6 @@ function openNative(id) {
   let pending;
   let closed = false;
   let ready = false;
-  let accepting = false;
-  let queuedRequest;
   let chunk;
   const encoder = new TextEncoder();
 
@@ -375,25 +285,16 @@ function openNative(id) {
   const transport = {
     prepare: () => exchange({type: 'prepare', profileId: id}, 'prepared'),
     activate: () => exchange({type: 'activate'}, 'ready'),
-    accept() {
-      accepting = true;
-      if (queuedRequest) dispatch(queuedRequest, send);
-      queuedRequest = undefined;
-    },
     close(reason = 'host_unavailable') {
       if (closed) return;
       closed = true;
       chunk = undefined;
-      queuedRequest = undefined;
       complete(reason);
       try { port.disconnect(); } catch {}
     }
   };
 
-  function fail(reason) {
-    transport.close(reason);
-    disconnected(transport, reason);
-  }
+  const fail = (reason) => disconnected(transport, reason);
 
   function exchange(message, expected) {
     if (closed) return Promise.reject(new Error('host_unavailable'));
@@ -408,20 +309,6 @@ function openNative(id) {
   function send(value) {
     if (closed || connection !== transport) return;
     try { port.postMessage(value); } catch { fail('host_unavailable'); }
-  }
-
-  function dispatchWhenCommitted(request) {
-    if (accepting) {
-      dispatch(request, send);
-    } else if (request.method === '__bridgey_health') {
-      send({id: request.id, result: false});
-    } else if (!queuedRequest) {
-      // The host serializes bookmark calls. One may arrive while the new mode
-      // is being saved, after the host has already advertised readiness.
-      queuedRequest = request;
-    } else {
-      send({id: request.id, error: 'Bridgey Native is still switching modes.'});
-    }
   }
 
   function handleChunk(message) {
@@ -455,7 +342,7 @@ function openNative(id) {
     try { request = JSON.parse(chunk.parts.join('')); } catch {}
     if (request?.id !== id || typeof request.method !== 'string') { invalid(); return; }
     chunk = undefined;
-    dispatchWhenCommitted(request);
+    dispatch(request, send);
   }
 
   port.onDisconnect.addListener(() => {
@@ -491,90 +378,21 @@ function openNative(id) {
         chunk = undefined;
       }
       if (!validId(message.request?.id)) { fail('protocol_error'); return; }
-      dispatchWhenCommitted(message.request);
+      dispatch(message.request, send);
     }
   });
   return transport;
 }
 
-async function chooseMode(mode) {
-  if (mode !== 'native' && mode !== 'legacy') return {ok: false, reason: 'protocol_error'};
-  if (migration) return {ok: false, reason: 'busy'};
-  const change = {candidate: null, cancelled: false};
-  migration = change;
-  let switched = false;
-  try {
-    const saved = await readSettings();
-    if (change.cancelled) return {ok: false, reason: 'cancelled'};
-    if (savedMode(saved) === mode) {
-      if (mode === 'native' && agentDepth) return {ok: false, reason: 'busy'};
-      stopConnection();
-      return {ok: true};
-    }
-    if (agentDepth) return {ok: false, reason: 'busy'};
-
-    if (mode === 'native') {
-      if (saved.enabled === false) return {ok: false, reason: 'enable_first'};
-      if (!(await chrome.permissions.contains(NATIVE_PERMISSION))) {
-        return {ok: false, reason: 'permission_required'};
-      }
-      const id = await profileId(saved);
-      if (change.cancelled) return {ok: false, reason: 'cancelled'};
-      change.candidate = openNative(id);
-      await change.candidate.prepare();
-      if (agentDepth || change.cancelled) return {ok: false, reason: agentDepth ? 'busy' : 'cancelled'};
-      // The old connection stays usable through prepare. Retire it before the
-      // host publishes its endpoint, so both routes cannot accept writes.
-      stopConnection();
-      setStatus('connecting');
-      connection = change.candidate;
-      await change.candidate.activate();
-      if (change.cancelled) return {ok: false, reason: 'cancelled'};
-      if (connection !== change.candidate) throw new Error(state.reason || 'host_unavailable');
-      await chrome.storage.local.set({connectionMode: 'native'});
-      if (change.cancelled || connection !== change.candidate) {
-        await chrome.storage.local.set({connectionMode: 'legacy'});
-        return {ok: false, reason: change.cancelled ? 'cancelled' : state.reason || 'host_unavailable'};
-      }
-      state.mode = 'native';
-      connection.accept();
-      setStatus('connected');
-    } else {
-      stopConnection();
-      setStatus('connecting');
-      await chrome.storage.local.set({connectionMode: 'legacy'});
-    }
-    switched = true;
-    return {ok: true};
-  } catch (error) {
-    const reasons = ['profile_in_use', 'host_unavailable', 'host_timeout', 'host_not_registered', 'protocol_error'];
-    return {ok: false, reason: change.cancelled ? 'cancelled' :
-      reasons.includes(error.message) ? error.message : 'mode_change_failed'};
-  } finally {
-    if (change.candidate && !switched) {
-      if (connection === change.candidate) stopConnection();
-      else change.candidate.close();
-    }
-    migration = null;
-    if (!connection) {
-      setStatus('connecting');
-      connect();
-    }
-  }
-}
-
 chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
   if (msg === 'reconnect') {
-    if (state.mode === 'native' && agentDepth) reply({ok: false, reason: 'busy'});
+    if (agentDepth) reply({ok: false, reason: 'busy'});
     else {
       restart();
       reply({ok: true});
     }
   } else if (msg === 'state') {
-    reply({...state, switching: Boolean(migration)});
-  } else if (msg?.type === 'mode') {
-    chooseMode(msg.mode).then(reply);
-    return true;
+    reply(state);
   }
   return false;
 });
@@ -582,9 +400,13 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
 chrome.runtime.onStartup.addListener(connect);
 chrome.runtime.onInstalled.addListener(connect);
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && ('port' in changes || 'token' in changes || 'enabled' in changes)) restart();
-});
-chrome.permissions.onRemoved.addListener(({permissions}) => {
-  if (permissions?.includes('nativeMessaging') && (state.mode === 'native' || migration)) restart();
+  if (area === 'local' && 'enabled' in changes) {
+    if (changes.enabled.newValue === false) {
+      stopConnection();
+      setStatus('off');
+    } else {
+      restart();
+    }
+  }
 });
 connect();

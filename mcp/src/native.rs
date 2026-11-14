@@ -186,7 +186,7 @@ pub async fn proxy_tool(
         }
         _ => return Err(match registration_error {
             Some(e) => format!("Native host registration failed: {e}"),
-            None => "The Chrome extension is not connected in Native mode. Open Bridgey's toolbar popup and choose Switch to Native or Reconnect.".into(),
+            None => "The Chrome extension is not connected in Native mode. Open Bridgey's toolbar popup and click Reconnect.".into(),
         }),
     };
     let request =
