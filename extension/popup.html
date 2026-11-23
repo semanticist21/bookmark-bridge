@@ -64,6 +64,13 @@ args = ["-y", "bookmark-bridge"]</code></pre><button type="button">Copy</button>
   <h3>3. Connect Bridgey</h3>
   <p>Click <b>Reconnect</b>. When Bridge shows <b>Connected</b>, ask your MCP client to run <code class="inline">bridge_status</code>.</p>
 
+  <section id="profileSetup" hidden>
+    <h3>Multiple Chrome profiles</h3>
+    <p>Give each profile its own MCP server entry. Add <code class="inline">--profile</code> and the ID below to this profile's command arguments.</p>
+    <p class="label">This Chrome profile's ID</p>
+    <div class="copy"><code id="profileId"></code><button type="button" aria-label="Copy profile ID">Copy</button></div>
+  </section>
+
   <p class="note"><a href="https://github.com/semanticist21/bookmark-bridge#install" target="_blank" rel="noreferrer">Full guide on GitHub</a></p>
 </dialog>
 <script src="popup.js"></script>

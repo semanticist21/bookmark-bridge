@@ -19,6 +19,7 @@ use sha2::Sha256;
 
 const ORIGIN: &str = "chrome-extension://ekokljgbbianihlpahackkfdendobngd/";
 const PROFILE_ID: &str = "00112233445566778899aabbccddeeff";
+const OTHER_PROFILE_ID: &str = "10112233445566778899aabbccddeeff";
 const WAIT: Duration = Duration::from_secs(30);
 
 fn legacy_state_root(profile: &Path) -> PathBuf {
@@ -66,7 +67,11 @@ impl Server {
     }
 
     fn start_in(profile: Arc<tempdir::TempDir>) -> Server {
-        let mut child = process_for(profile.path()).spawn().expect("spawn MCP proxy");
+        Server::start_with_args(profile, &[])
+    }
+
+    fn start_with_args(profile: Arc<tempdir::TempDir>, args: &[&str]) -> Server {
+        let mut child = process_for(profile.path()).args(args).spawn().expect("spawn MCP proxy");
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         let (send, replies) = mpsc::channel();
@@ -272,27 +277,31 @@ fn bookmark_reply(fake: &mut Fake, request: &Value) -> Value {
     }
 }
 
-fn authenticated_client(profile: &Path) -> TcpStream {
-    let registration = if cfg!(target_os = "macos") {
+fn registration_root(profile: &Path) -> PathBuf {
+    if cfg!(target_os = "macos") {
         profile.join("Library/Application Support/Bridgey/native-v2")
     } else if cfg!(windows) {
         profile.join("Bridgey/native-v2")
     } else {
         profile.join(".local/share/bridgey/native-v2")
-    };
+    }
+}
+
+fn authenticated_client(profile: &Path) -> TcpStream {
+    let registration = registration_root(profile);
     let endpoint: Value = serde_json::from_slice(
-        &std::fs::read(registration.join("endpoint.json")).unwrap(),
+        &std::fs::read(registration.join("profiles").join(PROFILE_ID).join("endpoint.json")).unwrap(),
     ).unwrap();
     let port = u16::try_from(endpoint["port"].as_u64().unwrap()).unwrap();
     let secret: [u8; 32] = serde_json::from_value(endpoint["secret"].clone()).unwrap();
     let mut socket = TcpStream::connect(("127.0.0.1", port)).unwrap();
     socket.set_read_timeout(Some(WAIT)).unwrap();
     let nonce = [7u8; 32];
-    write_frame(&mut socket, &json!({"protocol": 2, "nonce": nonce}));
+    write_frame(&mut socket, &json!({"protocol": 3, "profileId": PROFILE_ID, "nonce": nonce}));
     let challenge = read_frame(&mut socket).unwrap();
     let host_nonce: [u8; 32] = serde_json::from_value(challenge["nonce"].clone()).unwrap();
     let mut mac = Hmac::<Sha256>::new_from_slice(&secret).unwrap();
-    mac.update(b"bridgey-native-v2/client");
+    mac.update(b"bridgey-native-v3/client");
     mac.update(&nonce);
     mac.update(&host_nonce);
     let proof: [u8; 32] = mac.finalize().into_bytes().into();
@@ -326,8 +335,12 @@ struct Extension {
 
 impl Extension {
     fn attach(server: &Server) -> Extension {
+        Self::attach_profile(server, PROFILE_ID)
+    }
+
+    fn attach_profile(server: &Server, profile_id: &str) -> Extension {
         let (process, mut stdin, messages) = start_host(server.profile.path());
-        write_frame(&mut stdin, &json!({"type": "prepare", "profileId": PROFILE_ID}));
+        write_frame(&mut stdin, &json!({"type": "prepare", "profileId": profile_id}));
         let prepared = messages.recv_timeout(WAIT).expect("host preparation");
         assert_eq!(prepared["type"], "prepared", "{prepared}");
         write_frame(&mut stdin, &json!({"type": "activate"}));
@@ -687,19 +700,91 @@ fn reports_disconnected_when_the_host_lives_but_chrome_does_not_respond() {
 }
 
 #[test]
-fn another_chrome_profile_cannot_replace_the_active_one() {
+fn two_chrome_profiles_keep_bookmarks_and_history_separate() {
+    let mut first = Server::start();
+    let first_ext = Extension::attach(&first);
+    first.status(true);
+    let mut second = Server::start_with_args(first.profile.clone(), &["--profile", OTHER_PROFILE_ID]);
+    let second_ext = Extension::attach_profile(&second, OTHER_PROFILE_ID);
+    let mut ambiguous = Server::start_in(first.profile.clone());
+
+    for (server, expected_id) in [(&mut first, PROFILE_ID), (&mut second, OTHER_PROFILE_ID)] {
+        let (status, is_err) = server.tool("bridge_status", json!({}));
+        assert!(!is_err && status["extensionConnected"] == true, "{status}");
+        assert_eq!(status["profileId"], expected_id);
+    }
+    let (status, is_err) = ambiguous.tool("bridge_status", json!({}));
+    assert!(!is_err, "{status}");
+    assert_eq!(status["extensionConnected"], false);
+    assert_eq!(status["reason"], "profile_selection_required");
+
+    thread::scope(|scope| {
+        let first = scope.spawn(|| first.tool("bookmarks_update", json!({"id": "11", "title": "First"})));
+        let (out, is_err) = second.tool("bookmarks_update", json!({"id": "11", "title": "Second"}));
+        assert!(!is_err, "{out}");
+        let (out, is_err) = first.join().unwrap();
+        assert!(!is_err, "{out}");
+    });
+    assert_eq!(first_ext.fake.lock().unwrap().get("11").unwrap().1, "First");
+    assert_eq!(second_ext.fake.lock().unwrap().get("11").unwrap().1, "Second");
+    for (id, title, other) in [(PROFILE_ID, "First", "Second"), (OTHER_PROFILE_ID, "Second", "First")] {
+        let history = legacy_state_root(first.profile.path()).join("native-v2").join(id).join("history");
+        let tree = std::fs::read_to_string(history.join("tree.json")).unwrap();
+        assert!(tree.contains(title) && !tree.contains(other), "{tree}");
+    }
+
+    drop(first_ext);
+    let (status, is_err) = first.tool("bridge_status", json!({}));
+    assert!(!is_err, "{status}");
+    assert_eq!(status["extensionConnected"], false);
+    assert_eq!(status["profileId"], PROFILE_ID);
+    for server in [&mut first, &mut ambiguous] {
+        let (out, is_err) = server.tool("bookmarks_update", json!({"id": "11", "title": "Wrong profile"}));
+        assert!(is_err, "{out}");
+    }
+    second.status(true);
+    assert_eq!(second_ext.fake.lock().unwrap().get("11").unwrap().1, "Second");
+    let _reconnected = Extension::attach(&first);
+    first.status(true);
+}
+
+#[test]
+fn duplicate_host_for_the_same_profile_is_rejected() {
     let mut s = Server::start();
     let ext = Extension::attach(&s);
     let (_process, mut stdin, messages) = start_host(s.profile.path());
-    let other_profile = "10112233445566778899aabbccddeeff";
-    write_frame(&mut stdin, &json!({"type": "prepare", "profileId": other_profile}));
+    write_frame(&mut stdin, &json!({"type": "prepare", "profileId": PROFILE_ID}));
     let rejected = messages.recv_timeout(WAIT).expect("host rejection");
     assert_eq!(rejected["type"], "error", "{rejected}");
-    assert_eq!(rejected["reason"], "profile_in_use", "{rejected}");
+    assert_eq!(rejected["reason"], "profile_id_in_use", "{rejected}");
     s.status(true);
     let (out, is_err) = s.tool("bookmarks_update", json!({"id": "11", "title": "First profile"}));
     assert!(!is_err, "{out}");
     assert_eq!(ext.fake.lock().unwrap().get("11").unwrap().1, "First profile");
+}
+
+#[test]
+fn an_old_host_must_disconnect_before_new_hosts_start() {
+    let mut s = Server::start();
+    let root = registration_root(s.profile.path());
+    std::fs::create_dir_all(&root).unwrap();
+    let lock = std::fs::File::create(root.join("host.lock")).unwrap();
+    assert!(fs4::fs_std::FileExt::try_lock_exclusive(&lock).unwrap());
+    // 3.0 creates the history directory during prepare, even before any snapshots.
+    std::fs::create_dir_all(state_root(s.profile.path())).unwrap();
+    let (_process, mut stdin, messages) = start_host(s.profile.path());
+    write_frame(&mut stdin, &json!({"type": "prepare", "profileId": OTHER_PROFILE_ID}));
+    let rejected = messages.recv_timeout(WAIT).expect("host rejection");
+    assert_eq!(rejected, json!({"type": "error", "reason": "host_upgrade_required"}));
+    drop(lock);
+
+    let other = Extension::attach_profile(&s, OTHER_PROFILE_ID);
+    let lock = std::fs::OpenOptions::new().read(true).write(true).open(root.join("host.lock")).unwrap();
+    assert!(!fs4::fs_std::FileExt::try_lock_exclusive(&lock).unwrap());
+    let (status, is_err) = s.tool("bridge_status", json!({}));
+    assert!(!is_err, "{status}");
+    assert_eq!(status["reason"], "profile_selection_required");
+    drop(other);
 }
 
 #[test]

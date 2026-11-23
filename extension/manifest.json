@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bridgey \u2014 Bookmark MCP",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Lets a local MCP client read and tidy your Chrome bookmarks through Native Messaging.",
   "permissions": [
     "bookmarks",

@@ -264,15 +264,22 @@ fn compact(v: &Value) -> String {
 /// worktree: `git add -A` would otherwise commit the lock file and the dirty
 /// marker into every snapshot, and their appearing and disappearing would make
 /// "nothing changed, so do not commit" never hold.
-fn select_profile(profile: &str) -> Result<(), String> {
+fn profile_state_root() -> Result<PathBuf, String> {
     let base = if cfg!(windows) {
         std::env::var_os("LOCALAPPDATA").or_else(|| std::env::var_os("USERPROFILE"))
             .map(PathBuf::from)
     } else {
         std::env::var_os("HOME").map(|dir| PathBuf::from(dir).join(".local/state"))
     }.filter(|path| path.is_absolute()).ok_or("The user's state directory is unavailable.")?;
-    let dir = base.join("bookmark-bridge").join("native-v2").join(profile);
+    Ok(base.join("bookmark-bridge").join("native-v2"))
+}
+
+fn select_profile(profile: &str) -> Result<(), String> {
+    let dir = profile_state_root()?.join(profile);
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if !std::fs::symlink_metadata(&dir).map_err(|e| e.to_string())?.is_dir() {
+        return Err("Bridgey profile state is not a directory.".into());
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -662,24 +669,34 @@ fn find_duplicates(tree: &Value, folder_id: Option<&str>) -> Result<Value, Strin
 #[tokio::main]
 async fn main() {
     let mut args = std::env::args().skip(1);
-    if let Some(command) = args.next() {
-        let result = if command == "register-native" {
-            match args.next() {
-                Some(id) if args.next().is_none() => registration::register_unpacked(&id),
-                None => registration::register(),
-                _ => Err("Usage: bookmark-bridge register-native [extension-id]".into()),
+    let mut profile = match args.next() {
+        None => None,
+        Some(command) if command == "--profile" => match args.next() {
+            Some(id) if native::valid_profile_id(&id) && args.next().is_none() => Some(id),
+            _ => {
+                eprintln!("[bridgey] Usage: bookmark-bridge --profile <32 lowercase hex digits>");
+                std::process::exit(1);
             }
-        } else if registration::check_origin(&command) {
-            native::run_host().await
-        } else {
-            Err("Unknown command or unauthorized extension origin.".into())
-        };
-        if let Err(e) = &result {
-            eprintln!("[bridgey] {e}");
+        },
+        Some(command) => {
+            let result = if command == "register-native" {
+                match args.next() {
+                    Some(id) if args.next().is_none() => registration::register_unpacked(&id),
+                    None => registration::register(),
+                    _ => Err("Usage: bookmark-bridge register-native [extension-id]".into()),
+                }
+            } else if registration::check_origin(&command) {
+                native::run_host().await
+            } else {
+                Err("Unknown command or unauthorized extension origin.".into())
+            };
+            if let Err(e) = &result {
+                eprintln!("[bridgey] {e}");
+            }
+            // Tokio stdin may still be blocked after the browser drops its port.
+            std::process::exit(i32::from(result.is_err()));
         }
-        // Tokio stdin may still be blocked after the browser drops its port.
-        std::process::exit(i32::from(result.is_err()));
-    }
+    };
 
     let registration_error = registration::register().err();
     if let Some(e) = &registration_error {
@@ -709,7 +726,7 @@ async fn main() {
                 let p = req.get("params").cloned().unwrap_or(Value::Null);
                 let name = p.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
                 let args = p.get("arguments").cloned().unwrap_or(json!({}));
-                match native::proxy_tool(&name, args, registration_error.as_deref()).await {
+                match native::proxy_tool(&mut profile, &name, args, registration_error.as_deref()).await {
                     Ok(v) => Ok(json!({"content": [{"type": "text",
                         "text": serde_json::to_string_pretty(&v).unwrap_or_default()}]})),
                     Err(e) => Ok(json!({"content": [{"type": "text", "text": e}], "isError": true})),

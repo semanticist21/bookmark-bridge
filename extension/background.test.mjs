@@ -139,6 +139,17 @@ test('Native activation times out and a retry uses the existing profile ID', asy
   assert.deepEqual(ext.ports[1].sent, [{type: 'prepare', profileId}]);
 });
 
+test('Setup can read a stable profile ID while the connection is disabled', async () => {
+  const ext = extension({enabled: false});
+  assert.equal(await ext.send('profile-id'), profileId);
+  assert.equal(await ext.send('profile-id'), profileId);
+  assert.equal(ext.saved.nativeProfileId, profileId);
+  assert.equal(ext.ports.length, 0);
+  ext.setEnabled(true);
+  await tick();
+  assert.deepEqual(ext.ports[0].sent, [{type: 'prepare', profileId}]);
+});
+
 test('Native reconnect waits for a Chrome bookmark update after its original host disconnects', async () => {
   const ext = extension({nativeProfileId: profileId});
   await tick();

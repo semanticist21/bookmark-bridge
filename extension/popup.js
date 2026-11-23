@@ -4,7 +4,9 @@ const REASONS = {
   host_not_registered: 'Start the Native MCP server once to register its host, then reconnect.',
   host_unavailable: 'The Native host is unavailable. Start the Native MCP server and reconnect.',
   host_timeout: 'The Native host did not respond in time. Check the setup guide and reconnect.',
-  profile_in_use: 'Another browser profile is using the Native host. Disconnect it first.',
+  profile_in_use: 'An older Bridgey host already has a connection. Update your MCP server and reconnect.',
+  profile_id_in_use: 'Bridgey is already connected with this profile ID.',
+  host_upgrade_required: 'Start the updated MCP server, then reconnect Bridgey in the profile still using the older host.',
   protocol_error: 'The Native host sent an unexpected response. Update it and reconnect.',
   busy: 'Wait for the current bookmark request to finish, then try again.'
 };
@@ -70,7 +72,14 @@ async function refresh() {
     setText('unpackedCommand', 'npx -y bookmark-bridge register-native ' + chrome.runtime.id);
   }
   for (const button of document.querySelectorAll('[data-guide]')) {
-    button.addEventListener('click', () => $('guide').showModal());
+    button.addEventListener('click', async () => {
+      $('guide').showModal();
+      const id = await chrome.runtime.sendMessage('profile-id').catch(() => null);
+      if (id) {
+        setText('profileId', id);
+        $('profileSetup').hidden = false;
+      }
+    });
   }
   $('guideClose').addEventListener('click', () => $('guide').close());
   for (const button of document.querySelectorAll('.copy button')) {

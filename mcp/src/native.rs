@@ -1,6 +1,6 @@
 use std::fs::{self, File, OpenOptions};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 use std::time::Duration;
 
@@ -13,7 +13,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
-use crate::{handle_tool, registration, select_profile, tools, Bridge};
+use crate::{handle_tool, profile_state_root, registration, select_profile, tools, Bridge};
 
 pub const CHROME_INPUT_LIMIT: usize = 64 * 1024 * 1024;
 const CHROME_OUTPUT_LIMIT: usize = 1024 * 1024;
@@ -22,14 +22,49 @@ const AUTH_LIMIT: usize = 1024;
 const CHUNK_BYTES: usize = 128 * 1024;
 const CONNECT_BUDGET: Duration = Duration::from_secs(2);
 const NATIVE_STARTUP_BUDGET: Duration = Duration::from_secs(8);
+const IPC_PROTOCOL: u8 = 3;
 type Secret = [u8; 32];
 type AuthMac = Hmac<Sha256>;
 
 #[derive(Deserialize, Serialize)]
 struct Endpoint {
     protocol: u8,
+    profile_id: String,
     port: u16,
     secret: Secret,
+}
+
+pub fn valid_profile_id(id: &str) -> bool {
+    id.len() == 32
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn known_profiles() -> io::Result<Vec<String>> {
+    // History directories survive an offline host and are already present on 3.0.
+    let path = profile_state_root().map_err(io::Error::other)?;
+    let entries = match fs::read_dir(path) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut profiles = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if let Ok(id) = entry.file_name().into_string() {
+            if valid_profile_id(&id) {
+                if !entry.file_type()?.is_dir() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "Bridgey profile state is not a directory.",
+                    ));
+                }
+                profiles.push(id);
+            }
+        }
+    }
+    Ok(profiles)
 }
 
 fn random_secret() -> Result<Secret, String> {
@@ -81,7 +116,7 @@ async fn write_payload(
 
 fn proof(secret: &Secret, role: &[u8], client: &Secret, host: &Secret) -> AuthMac {
     let mut mac = AuthMac::new_from_slice(secret).expect("HMAC accepts a 32-byte key");
-    mac.update(b"bridgey-native-v2/");
+    mac.update(b"bridgey-native-v3/");
     mac.update(role);
     mac.update(client);
     mac.update(host);
@@ -94,9 +129,13 @@ fn auth_bytes(message: &Value, key: &str) -> Result<Secret, String> {
 
 async fn authenticate_client(socket: &mut TcpStream, endpoint: &Endpoint) -> Result<(), String> {
     let client = random_secret()?;
-    write_frame(socket, &json!({"protocol": 2, "nonce": client}), AUTH_LIMIT)
-        .await
-        .map_err(|e| e.to_string())?;
+    write_frame(
+        socket,
+        &json!({"protocol": IPC_PROTOCOL, "profileId": endpoint.profile_id, "nonce": client}),
+        AUTH_LIMIT,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
     let reply = read_frame(socket, AUTH_LIMIT)
         .await
         .map_err(|e| e.to_string())?;
@@ -120,16 +159,19 @@ async fn authenticate_client(socket: &mut TcpStream, endpoint: &Endpoint) -> Res
     Ok(())
 }
 
-async fn authenticate_host(socket: &mut TcpStream, secret: &Secret) -> Result<(), String> {
+async fn authenticate_host(socket: &mut TcpStream, endpoint: &Endpoint) -> Result<(), String> {
     let hello = read_frame(socket, AUTH_LIMIT)
         .await
         .map_err(|e| e.to_string())?;
-    if hello["protocol"] != 2 {
+    if hello["protocol"] != IPC_PROTOCOL {
         return Err("Unsupported local protocol.".into());
+    }
+    if hello["profileId"] != endpoint.profile_id {
+        return Err("MCP client selected a different Chrome profile.".into());
     }
     let client = auth_bytes(&hello, "nonce")?;
     let host = random_secret()?;
-    let response: Secret = proof(secret, b"host", &client, &host)
+    let response: Secret = proof(&endpoint.secret, b"host", &client, &host)
         .finalize()
         .into_bytes()
         .into();
@@ -143,7 +185,7 @@ async fn authenticate_host(socket: &mut TcpStream, secret: &Secret) -> Result<()
     let reply = read_frame(socket, AUTH_LIMIT)
         .await
         .map_err(|e| e.to_string())?;
-    proof(secret, b"client", &client, &host)
+    proof(&endpoint.secret, b"client", &client, &host)
         .verify_slice(&auth_bytes(&reply, "proof")?)
         .map_err(|_| "MCP client authentication failed.")?;
     write_frame(socket, &json!({"authenticated": true}), AUTH_LIMIT)
@@ -151,23 +193,65 @@ async fn authenticate_host(socket: &mut TcpStream, secret: &Secret) -> Result<()
         .map_err(|e| e.to_string())
 }
 
-fn offline_status(reason: &str) -> Value {
+fn offline_status(reason: &str, profile: Option<&str>) -> Value {
     json!({
-        "extensionConnected": false, "pendingRequests": 0, "transport": "native", "reason": reason
+        "extensionConnected": false, "pendingRequests": 0, "transport": "native",
+        "reason": reason, "profileId": profile
     })
 }
 
+fn offline(
+    name: &str,
+    profile: Option<&str>,
+    reason: &str,
+    error: impl Into<String>,
+) -> Result<Value, String> {
+    if name == "bridge_status" {
+        Ok(offline_status(reason, profile))
+    } else {
+        Err(error.into())
+    }
+}
+
 pub async fn proxy_tool(
+    selected_profile: &mut Option<String>,
     name: &str,
     args: Value,
     registration_error: Option<&str>,
 ) -> Result<Value, String> {
+    let unavailable = |profile| {
+        match registration_error {
+        Some(e) => offline(name, profile, "registration_failed", format!("Native host registration failed: {e}")),
+        None => offline(
+            name, profile, "native_host_unavailable",
+            "The Chrome extension is not connected in Native mode. Start the updated MCP server and choose Reconnect in the selected Chrome profile.",
+        ),
+    }
+    };
+    if selected_profile.is_none() {
+        match known_profiles().as_deref() {
+            Ok([id]) => *selected_profile = Some(id.to_owned()),
+            Ok([]) => return unavailable(None),
+            Ok(_) => return offline(
+                name, None, "profile_selection_required",
+                "Bridgey found multiple Chrome profiles. Use --profile <id> in your MCP server arguments. Copy each ID from How to set up in the Bridgey popup.",
+            ),
+            Err(e) => return offline(
+                name, None, "profile_discovery_failed",
+                format!("Could not read Bridgey's Chrome profiles: {e}"),
+            ),
+        }
+    }
+    let profile = selected_profile.as_deref().unwrap();
     let connection = async {
-        let path = registration::root()?.join("endpoint.json");
+        let path = registration::root()?
+            .join("profiles")
+            .join(profile)
+            .join("endpoint.json");
         let bytes = fs::read(path).map_err(|e| e.to_string())?;
         let endpoint: Endpoint = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
-        if endpoint.protocol != 2 {
-            return Err("Unsupported Bridgey host protocol.".into());
+        if endpoint.protocol != IPC_PROTOCOL || endpoint.profile_id != profile {
+            return Err("Invalid Bridgey endpoint for the selected Chrome profile.".into());
         }
         let mut socket = TcpStream::connect(("127.0.0.1", endpoint.port))
             .await
@@ -177,17 +261,7 @@ pub async fn proxy_tool(
     };
     let mut socket = match timeout(CONNECT_BUDGET, connection).await {
         Ok(Ok(socket)) => socket,
-        _ if name == "bridge_status" => {
-            return Ok(offline_status(if registration_error.is_some() {
-                "registration_failed"
-            } else {
-                "native_host_unavailable"
-            }));
-        }
-        _ => return Err(match registration_error {
-            Some(e) => format!("Native host registration failed: {e}"),
-            None => "The Chrome extension is not connected in Native mode. Open Bridgey's toolbar popup and click Reconnect.".into(),
-        }),
+        _ => return unavailable(Some(profile)),
     };
     let request =
         serde_json::to_vec(&json!({"name": name, "args": args})).map_err(|e| e.to_string())?;
@@ -201,14 +275,16 @@ pub async fn proxy_tool(
     let response = if name == "bridge_status" {
         match timeout(Duration::from_secs(3), response).await {
             Ok(response) => response,
-            Err(_) => return Ok(offline_status("native_host_not_responding")),
+            Err(_) => return Ok(offline_status("native_host_not_responding", Some(profile))),
         }
     } else {
         response.await
     };
     let reply = match response {
         Ok(reply) => reply,
-        Err(_) if name == "bridge_status" => return Ok(offline_status("native_host_disconnected")),
+        Err(_) if name == "bridge_status" => {
+            return Ok(offline_status("native_host_disconnected", Some(profile)))
+        }
         Err(_) => return Err(
             "The Native host disconnected during the request. Whether a change was applied is unknown. Check history_drift before retrying.".into()
         ),
@@ -216,19 +292,26 @@ pub async fn proxy_tool(
     if let Some(error) = reply["error"].as_str() {
         return Err(error.into());
     }
-    reply
+    let mut result = reply
         .get("result")
         .cloned()
-        .ok_or("Invalid response from the Native host.".into())
+        .ok_or("Invalid response from the Native host.")?;
+    if name == "bridge_status" {
+        result
+            .as_object_mut()
+            .ok_or("Invalid status response from the Native host.")?
+            .insert("profileId".into(), json!(profile));
+    }
+    Ok(result)
 }
 
 async fn serve_client(
     mut socket: TcpStream,
-    secret: &Secret,
+    endpoint: &Endpoint,
     bridge: &Bridge,
     execution: &Mutex<()>,
 ) -> Result<(), String> {
-    timeout(CONNECT_BUDGET, authenticate_host(&mut socket, secret))
+    timeout(CONNECT_BUDGET, authenticate_host(&mut socket, endpoint))
         .await
         .map_err(|e| e.to_string())??;
     let request = timeout(CONNECT_BUDGET, read_frame(&mut socket, IPC_LIMIT))
@@ -299,6 +382,16 @@ async fn write_request(
 struct HostLock {
     endpoint: PathBuf,
     _file: File,
+    _legacy_lock: File,
+}
+
+fn open_lock(path: &Path) -> io::Result<File> {
+    OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(path)
 }
 
 impl Drop for HostLock {
@@ -325,29 +418,27 @@ pub async fn run_host() -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
     let profile = prepare["profileId"].as_str().unwrap_or_default();
-    if prepare["type"] != "prepare"
-        || profile.len() != 32
-        || !profile
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-    {
+    if prepare["type"] != "prepare" || !valid_profile_id(profile) {
         return native_error(&mut output, "protocol_error").await;
     }
     let setup = async {
         let root = registration::root()?;
-        let lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(root.join("host.lock"))
-            .map_err(|e| e.to_string())?;
+        // A 3.0 host takes this lock exclusively and can still use the same history.
+        let legacy_lock = open_lock(&root.join("host.lock")).map_err(|e| e.to_string())?;
+        if !fs4::fs_std::FileExt::try_lock_shared(&legacy_lock).map_err(|e| e.to_string())? {
+            return Ok::<_, String>(Err("host_upgrade_required"));
+        }
+        let _ = fs::remove_file(root.join("endpoint.json"));
+        let runtime = root.join("profiles").join(profile);
+        fs::create_dir_all(&runtime).map_err(|e| e.to_string())?;
+        let lock = open_lock(&runtime.join("host.lock")).map_err(|e| e.to_string())?;
         if !fs4::fs_std::FileExt::try_lock_exclusive(&lock).map_err(|e| e.to_string())? {
-            return Ok::<_, String>(None);
+            return Ok(Err("profile_id_in_use"));
         }
         let guard = HostLock {
-            endpoint: root.join("endpoint.json"),
+            endpoint: runtime.join("endpoint.json"),
             _file: lock,
+            _legacy_lock: legacy_lock,
         };
         let _ = fs::remove_file(&guard.endpoint);
         select_profile(profile)?;
@@ -356,16 +447,17 @@ pub async fn run_host() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
         let endpoint = Endpoint {
-            protocol: 2,
+            protocol: IPC_PROTOCOL,
+            profile_id: profile.into(),
             port,
             secret: random_secret()?,
         };
-        Ok(Some((guard, listener, endpoint)))
+        Ok(Ok((guard, listener, endpoint)))
     }
     .await;
     let (guard, listener, endpoint) = match setup {
-        Ok(Some(setup)) => setup,
-        Ok(None) => return native_error(&mut output, "profile_in_use").await,
+        Ok(Ok(setup)) => setup,
+        Ok(Err(reason)) => return native_error(&mut output, reason).await,
         Err(e) => {
             native_error(&mut output, "host_unavailable").await?;
             return Err(e);
@@ -428,14 +520,15 @@ pub async fn run_host() -> Result<(), String> {
         }
         Ok(())
     };
+    let endpoint = std::sync::Arc::new(endpoint);
     let serve = async {
         loop {
             let (socket, _) = listener.accept().await.map_err(|e| e.to_string())?;
             let bridge = bridge.clone();
             let execution = execution.clone();
-            let secret = endpoint.secret;
+            let endpoint = endpoint.clone();
             tokio::spawn(async move {
-                let _ = serve_client(socket, &secret, &bridge, &execution).await;
+                let _ = serve_client(socket, &endpoint, &bridge, &execution).await;
             });
         }
     };
@@ -447,22 +540,34 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn stale_or_forged_endpoints_cannot_complete_authentication() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
-        let endpoint = Endpoint {
-            protocol: 2,
-            port: listener.local_addr().unwrap().port(),
-            secret: [1; 32],
-        };
-        let server = tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.unwrap();
-            authenticate_host(&mut socket, &[2; 32]).await
-        });
-        let mut socket = TcpStream::connect(("127.0.0.1", endpoint.port))
-            .await
-            .unwrap();
-        assert!(authenticate_client(&mut socket, &endpoint).await.is_err());
-        drop(socket);
-        assert!(server.await.unwrap().is_err());
+    async fn invalid_endpoints_cannot_complete_authentication() {
+        let profile = "0123456789abcdef0123456789abcdef";
+        for (client_profile, client_secret) in [
+            (profile, [2; 32]),
+            ("fedcba9876543210fedcba9876543210", [1; 32]),
+        ] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let endpoint = Endpoint {
+                protocol: IPC_PROTOCOL,
+                profile_id: client_profile.into(),
+                port: listener.local_addr().unwrap().port(),
+                secret: client_secret,
+            };
+            let host = Endpoint {
+                secret: [1; 32],
+                profile_id: profile.into(),
+                ..endpoint
+            };
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                authenticate_host(&mut socket, &host).await
+            });
+            let mut socket = TcpStream::connect(("127.0.0.1", endpoint.port))
+                .await
+                .unwrap();
+            assert!(authenticate_client(&mut socket, &endpoint).await.is_err());
+            drop(socket);
+            assert!(server.await.unwrap().is_err());
+        }
     }
 }

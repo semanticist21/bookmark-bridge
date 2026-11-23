@@ -42,8 +42,34 @@ loopback connection.
    **Bridge Connected**, call `bridge_status` from your MCP client.
 
 The first server startup installs the native host outside the npm cache and
-registers it with Chrome. Bridgey connects one Chrome profile at a time. If
-another profile is connected, turn Bridgey off in that profile first.
+registers it with Chrome. After upgrading from 3.0, update and restart every
+MCP client that runs Bridgey. Click **Reconnect** in the previously connected
+Chrome profile before reconnecting the others.
+
+### Multiple Chrome profiles
+
+Open Bridgey → **How to set up** in each Chrome profile and copy its profile
+ID under **Multiple Chrome profiles**. Give each profile its own MCP server
+entry and pass its ID to `--profile`. For example, in Codex:
+
+```toml
+[mcp_servers.bookmark-bridge-work]
+command = "npx"
+args = ["-y", "bookmark-bridge", "--profile", "<work profile ID>"]
+
+[mcp_servers.bookmark-bridge-personal]
+command = "npx"
+args = ["-y", "bookmark-bridge", "--profile", "<personal profile ID>"]
+```
+
+Add only the intended entry to any MCP client configuration that should
+access a single profile. `bridge_status` reports the selected ID. A session
+stays bound to that profile through disconnects and reconnects.
+
+The original command works when Bridgey knows one profile. Once it has seen
+more than one, new sessions need `--profile`, even when only one profile is
+online. If reinstalling the extension creates a new ID, copy it again and
+update the corresponding server entry.
 
 ### Unpacked development extension
 

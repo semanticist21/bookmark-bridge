@@ -352,7 +352,7 @@ function openNative(id) {
   port.onMessage.addListener((message) => {
     if (closed) return;
     if (message?.type === 'error') {
-      const reasons = ['profile_in_use', 'host_unavailable', 'protocol_error'];
+      const reasons = ['profile_in_use', 'profile_id_in_use', 'host_upgrade_required', 'host_unavailable', 'protocol_error'];
       fail(reasons.includes(message.reason) ? message.reason : 'protocol_error');
       return;
     }
@@ -393,6 +393,9 @@ chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
     }
   } else if (msg === 'state') {
     reply(state);
+  } else if (msg === 'profile-id') {
+    chrome.storage.local.get('nativeProfileId').then(profileId).then(reply, () => reply(null));
+    return true;
   }
   return false;
 });
